@@ -458,6 +458,8 @@ export function connect(rawId: string, opts: ConnectOptions = {}): string | null
   const password = opts.password ?? savedPassword(id);
   if (opts.remember && opts.password) rememberPassword(id, opts.password);
   const s = settings.value;
+  // Name the sender by its verified device name and ID, not just a number.
+  const sender = () => (session.host ? `${session.host.name} (${formatId(id)})` : (contact?.name ?? formatId(id)));
   const session = new ViewerSession({
     signaling,
     identity,
@@ -474,7 +476,7 @@ export function connect(rawId: string, opts: ConnectOptions = {}): string | null
     swapCmdCtrl: s.swapCmdCtrl,
     fileSink: platform.viewerFileSink,
     // Files from the device we are helping are never saved without asking.
-    fileConsent: (meta) => askFile(contact?.name ?? formatId(id), meta, true),
+    fileConsent: (meta) => askFile(sender(), meta, true),
   });
   if (opts.viewOnly) session.viewOnly = true;
   session.on('host', (info) => {

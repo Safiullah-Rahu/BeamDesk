@@ -1,6 +1,6 @@
 {
   "name": "@beamdesk/server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "BeamDesk signaling server: device registry, connection relay, TURN credentials and the web app.",
   "license": "MIT",
@@ -15,7 +15,7 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@beamdesk/core": "1.0.0",
+    "@beamdesk/core": "*",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.2"
   }

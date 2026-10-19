@@ -1,7 +1,7 @@
 {
   "name": "beamdesk-desktop",
   "productName": "BeamDesk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "BeamDesk — free, open-source, end-to-end encrypted remote desktop.",
   "license": "MIT",
@@ -22,7 +22,7 @@
     "@jitsi/robotjs": "0.6.24"
   },
   "devDependencies": {
-    "@beamdesk/core": "1.0.0",
+    "@beamdesk/core": "*",
     "electron": "44.9.0",
     "electron-builder": "26.15.3",
     "esbuild": "^0.28.2"

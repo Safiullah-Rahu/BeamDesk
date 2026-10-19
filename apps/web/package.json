@@ -1,6 +1,6 @@
 {
   "name": "@beamdesk/web",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "BeamDesk user interface - runs in the browser and inside the desktop app.",
   "license": "MIT",
@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@beamdesk/core": "1.0.0",
+    "@beamdesk/core": "*",
     "@preact/signals": "^2.3.1",
     "lucide-preact": "^1.59.0",
     "preact": "^11.0.1"

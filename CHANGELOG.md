@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+- The "Save this file?" dialog names the sender by its verified device name and ID instead of only a number.
+- Updated to preact 11, TypeScript 7, Vite 8, esbuild 0.28, Playwright 1.64 and noble-curves/hashes 2.4.
+- Releases can be published from the Actions tab (**Release desktop apps → Run workflow** with a version); pull requests that touch the server image now build it before merging.
+- New screenshots in light and dark theme (they follow your GitHub theme in the README and user guide), generated from the real app with `npm run screenshots`.
+
 ## 1.0.0 — first release
 
 Security audit before release — 32 issues fixed, see [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md). Highlights:

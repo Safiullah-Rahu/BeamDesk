@@ -10,7 +10,7 @@
  */
 
 export const PROTOCOL_VERSION = 2;
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.0.1';
 
 /** Hard limits, enforced on both ends. */
 export const LIMITS = {
