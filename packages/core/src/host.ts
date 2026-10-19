@@ -18,9 +18,12 @@ import {
   APP_VERSION,
   decodePointerMove,
   hostTranscript,
+  isSessionId,
+  normalizePermissions,
   parseControlMessage,
   PROTOCOL_VERSION,
   sanitizeName,
+  sanitizePlatform,
   seqNewer,
   viewerTranscript,
   type AnswerData,
@@ -40,10 +43,10 @@ import {
 import { CandidateGate, createPeer, sendControl, type PeerChannels } from './peer.ts';
 import { addBitrateHints, channelIdentifier, fingerprintKey, orderCodecs, splitCandidates, type CodecPreference } from './sdp.ts';
 import { chooseCodecs, planQuality } from './quality.ts';
-import { FileTransfers, type FileSinkFactory, type Transfer } from './files.ts';
+import { FileTransfers, type FileMeta, type FileSinkFactory, type Transfer } from './files.ts';
 import { codeToKey } from './keymap.ts';
 import type { IncomingSignal, SignalingClient } from './signaling.ts';
-import { Emitter, fromBase64Url, toBase64Url, utf8 } from './util.ts';
+import { Emitter, fromBase64Url, pushChat, toBase64Url, utf8 } from './util.ts';
 import type { ChatMessage } from './viewer.ts';
 
 export type InputCommand =
@@ -66,6 +69,8 @@ export interface HostPlatform {
   writeClipboard?(text: string): Promise<void>;
   watchClipboard?(cb: (text: string) => void): () => void;
   fileSink: FileSinkFactory;
+  /** Asked before an incoming file is saved (e.g. only for programs and scripts). */
+  fileConsent?: (meta: FileMeta, from: string) => Promise<boolean>;
 }
 
 export interface HostSettings {
@@ -94,6 +99,8 @@ export interface HostSecrets {
 
 export interface TrustStore {
   isTrusted(id: string, publicKey: string): boolean;
+  /** The ID belongs to a trusted device (its key is checked later, during authentication). */
+  isTrustedId(id: string): boolean;
   isBlocked(id: string): boolean;
   trust(id: string, publicKey: string, name: string): void;
   block(id: string, name: string): void;
@@ -133,14 +140,25 @@ type ServiceEvents = {
 
 const PROMPT_TIMEOUT = 60_000;
 const MAX_PENDING = 6;
-const MAX_FAILURES = 5;
 const FAILURE_WINDOW = 10 * 60_000;
+/** Wrong passwords from one device before that device is locked out. */
+const MAX_DEVICE_FAILURES = 5;
+const DEVICE_LOCK_TIME = 15 * 60_000;
+/** Wrong passwords from all devices together before password logins pause (distributed guessing). */
+const MAX_TOTAL_FAILURES = 20;
 const LOCK_TIME = 5 * 60_000;
+/** Accept prompts one device may cause per window, so nobody can spam the person at the screen. */
+const MAX_PROMPTS = 3;
+const PROMPT_WINDOW = 10 * 60_000;
+const MAX_TRACKED = 1000;
 
 export class HostService extends Emitter<ServiceEvents> {
   readonly sessions = new Map<string, HostSession>();
   private failures: number[] = [];
   private lockedUntil = 0;
+  private deviceFailures = new Map<string, number[]>();
+  private deviceLocks = new Map<string, number>();
+  private prompts = new Map<string, number[]>();
   private declined = new Map<string, number>();
   private preapproved = new Map<string, { keyHash: string; perms: Permissions; until: number }>();
   private off: (() => void) | null = null;
@@ -183,8 +201,20 @@ export class HostService extends Emitter<ServiceEvents> {
     this.preapproved.set(viewerId, { keyHash: viewerKeyHash, perms, until: Date.now() + ttlMs });
   }
 
-  isLocked(): boolean {
-    return Date.now() < this.lockedUntil;
+  /**
+   * Password logins are refused while the device is locked out, or while the host as a whole is
+   * (too many failures overall). Trusted devices are exempt from the global lock, so a stranger
+   * guessing passwords cannot keep the owner out.
+   */
+  /** Withdraws all help-link approvals that have not been used yet. */
+  revokePreapprovals(): void {
+    this.preapproved.clear();
+  }
+
+  isLocked(viewerId: string, trustedDevice = false): boolean {
+    const now = Date.now();
+    if ((this.deviceLocks.get(viewerId) ?? 0) > now) return true;
+    return !trustedDevice && now < this.lockedUntil;
   }
 
   /** @internal */
@@ -198,13 +228,48 @@ export class HostService extends Emitter<ServiceEvents> {
   /** @internal */
   recordFailure(viewerId: string, reason: AuthFailure): void {
     const now = Date.now();
+    const mine = (this.deviceFailures.get(viewerId) ?? []).filter((t) => now - t < FAILURE_WINDOW);
+    mine.push(now);
+    if (mine.length >= MAX_DEVICE_FAILURES) {
+      this.deviceLocks.set(viewerId, now + DEVICE_LOCK_TIME);
+      this.deviceFailures.delete(viewerId);
+    } else {
+      this.deviceFailures.set(viewerId, mine);
+    }
     this.failures = this.failures.filter((t) => now - t < FAILURE_WINDOW);
     this.failures.push(now);
-    if (this.failures.length >= MAX_FAILURES) {
+    if (this.failures.length >= MAX_TOTAL_FAILURES) {
       this.lockedUntil = now + LOCK_TIME;
       this.failures = [];
     }
+    this.prune(now);
     this.emit('auth-failure', { viewerId, reason });
+  }
+
+  /** @internal Returns false if this device has already caused too many accept prompts. */
+  allowPrompt(viewerId: string): boolean {
+    const now = Date.now();
+    const recent = (this.prompts.get(viewerId) ?? []).filter((t) => now - t < PROMPT_WINDOW);
+    if (recent.length >= MAX_PROMPTS) return false;
+    recent.push(now);
+    this.prompts.set(viewerId, recent);
+    this.prune(now);
+    return true;
+  }
+
+  private prune(now: number): void {
+    if (this.deviceFailures.size > MAX_TRACKED) {
+      for (const [id, list] of this.deviceFailures) if (!list.some((t) => now - t < FAILURE_WINDOW)) this.deviceFailures.delete(id);
+    }
+    if (this.deviceLocks.size > MAX_TRACKED) {
+      for (const [id, until] of this.deviceLocks) if (until <= now) this.deviceLocks.delete(id);
+    }
+    if (this.prompts.size > MAX_TRACKED) {
+      for (const [id, list] of this.prompts) if (!list.some((t) => now - t < PROMPT_WINDOW)) this.prompts.delete(id);
+    }
+    if (this.declined.size > MAX_TRACKED) {
+      for (const [id, until] of this.declined) if (until <= now) this.declined.delete(id);
+    }
   }
 
   /** @internal */
@@ -221,10 +286,10 @@ export class HostService extends Emitter<ServiceEvents> {
   sessionChanged(s: HostSession): void {
     // A prompt is resolved as soon as the session leaves the prompting phase.
     if (s.wasPrompting && s.phase !== 'prompting') this.emit('request-closed', s.sid);
-    if (s.phase === 'closed') {
-      this.sessions.delete(s.sid);
-      if (s.authorizedBy === 'otp') this.emit('otp-used', undefined);
-    }
+    // A one-time password is spent the moment it lets someone in, not when they leave:
+    // otherwise anyone else who saw it could still use it during the session.
+    if (s.phase === 'active' && s.authorizedBy === 'otp') this.emit('otp-used', undefined);
+    if (s.phase === 'closed') this.sessions.delete(s.sid);
     this.emit('sessions', this.active());
   }
 
@@ -234,7 +299,7 @@ export class HostService extends Emitter<ServiceEvents> {
       if (existing.viewerId === s.from) void existing.onSignal(s);
       return;
     }
-    if (s.kind !== 'offer' || (s.data as OfferData)?.restart) return;
+    if (s.kind !== 'offer' || (s.data as OfferData)?.restart || !isSessionId(s.sid)) return;
     const reject = (reason: AuthFailure) => this.opts.signaling.send(s.from, s.sid, 'auth-result', { ok: false, reason } satisfies AuthResult);
 
     if (this.opts.settings.access === 'off') return void reject('not-accepting');
@@ -244,7 +309,10 @@ export class HostService extends Emitter<ServiceEvents> {
     const pending = live.filter((x) => x.phase !== 'active');
     // Only accepted sessions count toward the limit, so unauthenticated requests cannot block it.
     if (live.length - pending.length >= Math.max(1, this.opts.settings.maxSessions)) return void reject('busy');
-    if (pending.length >= MAX_PENDING || pending.some((x) => x.viewerId === s.from)) return void reject('busy');
+    if (pending.some((x) => x.viewerId === s.from)) return void reject('busy');
+    // Strangers can fill the queue of unanswered requests; the owner's trusted devices still get in.
+    const cap = this.opts.trust.isTrustedId(s.from) ? MAX_PENDING * 2 : MAX_PENDING;
+    if (pending.length >= cap) return void reject('busy');
 
     const session = new HostSession(this, s.from, s.sid);
     this.sessions.set(s.sid, session);
@@ -314,7 +382,11 @@ export class HostSession extends Emitter<SessionEvents> {
     // No permissions at all until the session is accepted.
     this.perms = { ...VIEW_ONLY_PERMISSIONS };
     this.quality = { ...o.settings.quality };
-    this.files = new FileTransfers(o.platform.fileSink, () => this.phase === 'active' && this.perms.files && o.platform.capabilities().files);
+    this.files = new FileTransfers(
+      o.platform.fileSink,
+      () => this.phase === 'active' && this.perms.files && o.platform.capabilities().files,
+      o.platform.fileConsent ? (meta) => o.platform.fileConsent!(meta, this.viewerName) : null,
+    );
     this.files.on('update', (l) => this.emit('transfers', l));
     this.files.on('received', (t) => this.emit('file-received', t));
   }
@@ -327,7 +399,7 @@ export class HostSession extends Emitter<SessionEvents> {
     try {
       if (!offer || typeof offer.sdp !== 'string' || offer.sdp.length > 40_000) return this.reject('unsupported');
       this.viewerName = sanitizeName(offer.name);
-      this.viewerPlatform = (offer.platform as Platform) || 'unknown';
+      this.viewerPlatform = sanitizePlatform(offer.platform);
       const ice = await this.o.signaling.refreshIce();
       if (this.phase === 'closed') return;
 
@@ -398,15 +470,16 @@ export class HostSession extends Emitter<SessionEvents> {
         this.cpace[slot] = st;
         shares[slot] = toBase64Url(st.Y);
       }
+      const canAsk = settings.access === 'ask';
       const hello: HostHello = {
         v: PROTOCOL_VERSION,
         pk: this.o.identity.publicKeyB64,
-        sig: this.o.identity.sign(utf8(hostTranscript(this.sid, this.ci, this.viewerId))),
+        sig: this.o.identity.sign(utf8(hostTranscript(this.sid, this.ci, this.viewerId, { shares, canAsk }))),
         name: this.o.deviceName,
         platform: this.o.devicePlatform,
         version: APP_VERSION,
         shares,
-        canAsk: settings.access === 'ask',
+        canAsk,
         caps,
       };
       // Send the answer as created: it contains no ICE candidates (they are gated).
@@ -452,7 +525,9 @@ export class HostSession extends Emitter<SessionEvents> {
         break;
       }
       case 'bye':
-        this.close(typeof s.data?.reason === 'string' ? s.data.reason : 'remote-closed', false);
+        // Once the encrypted channel is up, only a goodbye on it counts: the server cannot end sessions.
+        if (this.channels?.control.readyState === 'open') break;
+        this.close('remote-closed', false);
         break;
     }
   }
@@ -471,10 +546,12 @@ export class HostSession extends Emitter<SessionEvents> {
     }
     this.viewerKey = a.pk;
 
+    const { settings, trust } = this.o;
+    const known = trust.isTrusted(this.viewerId, a.pk);
     let slot: PasswordSlot | null = null;
     const tried = a.shares && typeof a.shares === 'object' && Object.keys(a.shares).length > 0;
     if (tried) {
-      if (this.service.isLocked()) return this.reject('locked');
+      if (this.service.isLocked(this.viewerId, known)) return this.reject('locked');
       for (const s of PASSWORD_SLOTS) {
         const st = this.cpace[s];
         const share = a.shares[s];
@@ -497,15 +574,14 @@ export class HostSession extends Emitter<SessionEvents> {
       }
     }
 
-    const { settings, trust } = this.o;
     const defaults = { ...settings.defaultPerms };
     if (slot === 'perm') return this.accept(defaults, 'perm');
     if (slot === 'otp' && !settings.askEvenWithPassword) return this.accept(defaults, 'otp');
     const pre = this.service.takePreapproval(this.viewerId, a.pk);
     if (pre) return this.accept(pre, 'invite');
-    const known = trust.isTrusted(this.viewerId, a.pk);
     if (!slot && known && settings.trustedAutoAccept) return this.accept(defaults, 'trusted');
     if (!slot && settings.access !== 'ask') return this.reject('password-required');
+    if (!this.service.allowPrompt(this.viewerId)) return this.reject('busy');
 
     // Ask the person in front of the host device.
     this.signal('pending', {});
@@ -544,12 +620,15 @@ export class HostSession extends Emitter<SessionEvents> {
 
   private async accept(perms: Permissions, via: NonNullable<HostSession['authorizedBy']>): Promise<void> {
     if (this.phase === 'closed' || !this.pc) return;
+    // Several requests may have been waiting: the session limit applies when they are accepted.
+    if (this.service.active().length >= Math.max(1, this.o.settings.maxSessions)) return this.reject('busy');
     const caps = this.o.platform.capabilities();
+    const p = normalizePermissions(perms);
     this.perms = {
-      control: perms.control && caps.control,
-      clipboard: perms.clipboard && caps.clipboard,
-      files: perms.files && caps.files,
-      audio: perms.audio && caps.audio,
+      control: p.control && caps.control,
+      clipboard: p.clipboard && caps.clipboard,
+      files: p.files && caps.files,
+      audio: p.audio && caps.audio,
     };
     this.authorizedBy = via;
     this.startedAt = Date.now();
@@ -734,7 +813,7 @@ export class HostSession extends Emitter<SessionEvents> {
         break;
       case 'chat': {
         const msg: ChatMessage = { from: 'them', text: m.text, ts: Date.now() };
-        this.chat.push(msg);
+        pushChat(this.chat, msg);
         this.emit('chat', msg);
         break;
       }
@@ -755,7 +834,8 @@ export class HostSession extends Emitter<SessionEvents> {
 
   // ------------------------------------------------------------------ public controls
 
-  setPerms(p: Permissions): void {
+  setPerms(perms: Permissions): void {
+    const p = normalizePermissions(perms);
     const caps = this.o.platform.capabilities();
     const next = { control: p.control && caps.control, clipboard: p.clipboard && caps.clipboard, files: p.files && caps.files, audio: p.audio && caps.audio };
     if (this.perms.control && !next.control) this.o.platform.input?.(this.displayId, { k: 'release' });
@@ -776,7 +856,7 @@ export class HostSession extends Emitter<SessionEvents> {
     if (!t) return;
     const msg: ChatMessage = { from: 'me', text: t, ts: Date.now() };
     if (sendControl(this.channels?.control, { t: 'chat', text: t, ts: msg.ts })) {
-      this.chat.push(msg);
+      pushChat(this.chat, msg);
       this.emit('chat', msg);
     }
   }

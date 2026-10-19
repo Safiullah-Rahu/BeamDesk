@@ -29,7 +29,7 @@ import {
   type QualityPreset,
 } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
-import { closeTab, reconnect, settings, toast, updateSettings, type Tab } from '../state/app.ts';
+import { closeTab, reconnect, savedPassword, settings, toast, updateSettings, type Tab } from '../state/app.ts';
 import type { ScaleMode } from '../state/settings.ts';
 import { Button, IconButton, Menu, MenuItem, MenuLabel, MenuSep, Spinner } from './kit.tsx';
 import { ChatPanel } from './Chat.tsx';
@@ -80,9 +80,13 @@ export function Viewer({ tab, active }: { tab: Tab; active: boolean }) {
     const offs = [
       s.on('stream', attach),
       s.on('clipboard', (text) => {
-        if (settings.value.syncClipboard) void platform.clipboard.write(text);
+        // Applied only while the user is looking at this session, so the other side cannot
+        // silently swap what the user copied elsewhere (e.g. a bank account number).
+        pendingClip.current = text;
+        applyRemoteClipboard();
       }),
-      s.on('notice', (n) => toast(n.text, n.level)),
+      // Text written by the other device: label it so it cannot pose as a BeamDesk message.
+      s.on('notice', (n) => toast(`${s.host?.name ?? formatId(tab.hostId)} says: ${n.text}`, n.level)),
       s.on('file-received', (t) => toast(`Received ${t.name}`, 'success', platform.desktop && t.location ? { label: 'Show', run: () => platform.desktop!.revealFile(t.location!) } : undefined)),
     ];
     return () => offs.forEach((o) => o());
@@ -146,6 +150,17 @@ export function Viewer({ tab, active }: { tab: Tab; active: boolean }) {
     return () => clearTimeout(t);
   }, [s.state, showStats]);
 
+  // ---------------------------------------------------------------- clipboard (remote -> local)
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const pendingClip = useRef<string | null>(null);
+  const applyRemoteClipboard = () => {
+    const text = pendingClip.current;
+    if (text === null || !activeRef.current || !document.hasFocus() || !settings.value.syncClipboard) return;
+    pendingClip.current = null;
+    void platform.clipboard.write(text);
+  };
+
   // ---------------------------------------------------------------- clipboard (local -> remote)
   const pushClipboard = useCallback(async () => {
     if (!settings.value.syncClipboard || !s.perms.clipboard || s.viewOnly) return;
@@ -155,7 +170,11 @@ export function Viewer({ tab, active }: { tab: Tab; active: boolean }) {
 
   useEffect(() => {
     if (!active || s.state !== 'connected') return;
-    const onFocus = () => void pushClipboard();
+    applyRemoteClipboard();
+    const onFocus = () => {
+      applyRemoteClipboard();
+      void pushClipboard();
+    };
     window.addEventListener('focus', onFocus);
     // Desktop: keep the clipboard in sync while the user works in this window - never in the background.
     const poll = platform.kind === 'desktop' ? setInterval(() => document.hasFocus() && onFocus(), 1000) : null;
@@ -644,6 +663,8 @@ function StatusOverlay({ tab, password, setPassword }: { tab: Tab; password: str
   }
 
   const needsPassword = reason === 'bad-password' || reason === 'password-required';
+  // Security failures get no one-click retry: retrying blindly is exactly what an attacker hopes for.
+  const securityFailure = reason === 'bad-identity' || reason === 'host-proof';
   return (
     <div class="overlay">
       <div class="status-card" role="alert">
@@ -652,12 +673,16 @@ function StatusOverlay({ tab, password, setPassword }: { tab: Tab; password: str
         {reason === 'identity-changed' && (
           <p class="hint">If the other person reinstalled BeamDesk, you can trust the new identity. Otherwise, do not continue.</p>
         )}
+        {securityFailure && (
+          <p class="hint">Someone may be trying to intercept the connection. Check the ID with the other person (for example by phone) before trying again.</p>
+        )}
         {needsPassword && (
           <form
             class="password-box"
             onSubmit={(e) => {
               e.preventDefault();
-              reconnect(tab.key, { password, remember: false });
+              // Replaces a saved password that no longer works (it is never deleted automatically).
+              reconnect(tab.key, { password, remember: !!savedPassword(tab.hostId) });
             }}
           >
             <input type="password" class="input" placeholder="Password" autoFocus value={password} onInput={(e) => setPassword(e.currentTarget.value)} aria-label="Password" />
@@ -667,9 +692,14 @@ function StatusOverlay({ tab, password, setPassword }: { tab: Tab; password: str
           </form>
         )}
         <div class="row-actions center">
-          {!needsPassword && reason !== 'identity-changed' && (
+          {!needsPassword && !securityFailure && reason !== 'identity-changed' && reason !== 'password-unavailable' && (
             <Button variant="primary" onClick={() => reconnect(tab.key)}>
               Reconnect
+            </Button>
+          )}
+          {reason === 'password-unavailable' && (
+            <Button variant="primary" onClick={() => reconnect(tab.key, { password: '' })}>
+              Ask to connect without a password
             </Button>
           )}
           {reason === 'identity-changed' && (

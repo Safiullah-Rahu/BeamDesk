@@ -1,11 +1,11 @@
 import { expect, type Browser, type Page } from '@playwright/test';
 
 /** Each device gets its own browser context, i.e. its own identity and storage. */
-export async function device(browser: Browser): Promise<Page> {
+export async function device(browser: Browser, url = '/'): Promise<Page> {
   const ctx = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'], viewport: { width: 1280, height: 820 } });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[pageerror] ${e.message}`));
-  await page.goto('/');
+  await page.goto(url);
   await expect(page.locator('.pill.ok')).toBeVisible({ timeout: 15_000 });
   return page;
 }

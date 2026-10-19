@@ -128,6 +128,8 @@ export function describeConnectionError(reason: string): string {
     'bad-identity': 'The identity of the other device could not be verified.',
     'identity-changed': 'The other device’s security key has changed since your last session. This can happen after reinstalling BeamDesk — or if someone is intercepting the connection.',
     'host-proof': 'The other device could not prove it knows the password. The connection was stopped for your safety.',
+    'password-unavailable': 'The other device does not accept passwords right now, so its identity could not be confirmed. Connect without a password and ask the person to accept.',
+    'capture-ended': 'The other side stopped sharing their screen.',
     unsupported: 'The other device runs an incompatible BeamDesk version.',
     'remote-closed': 'The session was ended by the other side.',
     'connection-failed': 'The connection was lost and could not be restored.',
@@ -136,5 +138,6 @@ export function describeConnectionError(reason: string): string {
     'server': 'Not connected to the BeamDesk server.',
     local: 'Session ended.',
   };
-  return map[reason] ?? `Connection ended (${reason}).`;
+  // Reasons can come from the other device: never display unknown text verbatim.
+  return Object.hasOwn(map, reason) ? map[reason] : 'The session ended.';
 }

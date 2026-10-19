@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isWayland } from './input.ts';
+import { isWayland, lockShortcut } from './input.ts';
 
 function run(cmd: string, args: string[]): Promise<boolean> {
   return new Promise((resolve) => {
@@ -20,10 +20,13 @@ function run(cmd: string, args: string[]): Promise<boolean> {
 
 export async function lockScreen(): Promise<void> {
   if (process.platform === 'win32') {
-    await run('rundll32.exe', ['user32.dll,LockWorkStation']);
+    // Absolute path: Windows looks in the current directory first for bare program names.
+    const rundll = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'rundll32.exe');
+    await run(rundll, ['user32.dll,LockWorkStation']);
   } else if (process.platform === 'darwin') {
-    // Locks when "require password after sleep" is on (the macOS default).
-    await run('pmset', ['displaysleepnow']);
+    // Ctrl+Cmd+Q is "Lock Screen" and always asks for the password; sleeping the display only
+    // locks when "require password after sleep" is on.
+    if (!lockShortcut()) await run('/usr/bin/pmset', ['displaysleepnow']);
   } else if (!(await run('loginctl', ['lock-session']))) {
     if (!(await run('xdg-screensaver', ['lock']))) await run('gnome-screensaver-command', ['-l']);
   }

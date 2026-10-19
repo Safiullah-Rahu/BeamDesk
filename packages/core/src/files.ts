@@ -26,6 +26,9 @@ export interface FileSink {
 /** Returns null to refuse the file (e.g. no permission). */
 export type FileSinkFactory = (meta: FileMeta) => Promise<FileSink | null> | FileSink | null;
 
+/** Asks the local user whether to save an incoming file. Resolves false to refuse it. */
+export type FileConsent = (meta: FileMeta) => Promise<boolean>;
+
 export type TransferState = 'queued' | 'active' | 'done' | 'failed' | 'cancelled';
 
 export interface Transfer {
@@ -45,6 +48,7 @@ export interface Transfer {
 type Msg =
   | { t: 'start'; id: number; name: string; size: number; mime: string }
   | { t: 'end'; id: number }
+  | { t: 'accept'; id: number }
   | { t: 'ack'; id: number }
   | { t: 'cancel'; id: number; reason?: string }
   | { t: 'reject'; id: number; reason?: string };
@@ -54,11 +58,34 @@ const HIGH_WATER = 8 * 1024 * 1024;
 const MAX_UNWRITTEN = 64 * 1024 * 1024;
 const LOW_WATER = 1 * 1024 * 1024;
 const MAX_NAME = 255;
+/** Incoming files in flight at once; more are refused so a peer cannot pile up open files. */
+const MAX_INCOMING = 4;
+/** Finished transfers kept in the list. */
+const MAX_RECORDS = 200;
+
+/** Extensions that can run code when opened. Receiving one deserves an explicit warning. */
+const RISKY = new Set(
+  (
+    'exe com scr pif bat cmd ps1 psm1 vbs vbe js jse wsf wsh hta msi msp msc lnk url reg cpl dll jar ' +
+    'app pkg dmg command tool sh bash zsh run bin appimage deb rpm py pl rb iso img vhd vhdx scpt workflow terminal'
+  ).split(' '),
+);
+
+/** True for executables, scripts, installers and shortcuts. */
+export function isRiskyFileName(name: string): boolean {
+  const lower = name.toLowerCase().replace(/[\s.]+$/, '');
+  const ext = lower.includes('.') ? lower.slice(lower.lastIndexOf('.') + 1) : '';
+  return RISKY.has(ext);
+}
 
 /** Strips paths and characters that are invalid on Windows/macOS/Linux. */
 export function sanitizeFileName(name: string): string {
   let n = String(name || '').split(/[\\/]/).pop() || '';
-  n = n.replace(/[\u0000-\u001f\u007f<>:"|?*‪-‮⁦-⁩]/g, '_').replace(/^[\s.]+|[\s.]+$/g, '');
+  n = n
+    .replace(/[\u0000-\u001f\u007f<>:"|?*\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '_')
+    // Runs of spaces can push a real extension out of sight ("invoice.pdf          .exe").
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.]+|[\s.]+$/g, '');
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(n)) n = `_${n}`;
   if (!n) n = 'file';
   if (n.length > MAX_NAME) {
@@ -75,16 +102,20 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
   private outgoing: { transfer: Transfer; file: Blob }[] = [];
   private sending = false;
   private incoming = new Map<number, { transfer: Transfer; sink: FileSink | null; chain: Promise<void>; pending: number }>();
+  /** Outgoing files waiting for the receiver to accept them. */
+  private awaiting = new Map<number, (accepted: boolean) => void>();
   private cancelled = new Set<number>();
   private updateTimer: ReturnType<typeof setTimeout> | null = null;
 
   private readonly sinkFactory: FileSinkFactory;
   private readonly allowReceive: () => boolean;
+  private readonly consent: FileConsent | null;
 
-  constructor(sinkFactory: FileSinkFactory, allowReceive: () => boolean) {
+  constructor(sinkFactory: FileSinkFactory, allowReceive: () => boolean, consent: FileConsent | null = null) {
     super();
     this.sinkFactory = sinkFactory;
     this.allowReceive = allowReceive;
+    this.consent = consent;
   }
 
   attach(channel: RTCDataChannel): void {
@@ -126,6 +157,7 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     t.state = 'cancelled';
     this.cancelled.add(id);
     this.outgoing = this.outgoing.filter((o) => o.transfer.id !== id);
+    this.awaiting.get(id)?.(false);
     const inc = this.incoming.get(id);
     if (inc) {
       inc.sink?.abort();
@@ -183,10 +215,15 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
 
   private async sendOne(t: Transfer, file: Blob): Promise<void> {
     const ch = this.channel!;
+    // Nothing is streamed until the receiver (or its user) has accepted the file.
+    const accepted = new Promise<boolean>((resolve) => this.awaiting.set(t.id, resolve));
+    this.sendJson({ t: 'start', id: t.id, name: t.name, size: t.size, mime: file.type || 'application/octet-stream' });
+    const ok = await accepted;
+    this.awaiting.delete(t.id);
+    if (!ok || this.cancelled.has(t.id) || t.state !== 'queued') return;
     t.state = 'active';
     t.startedAt = Date.now();
     this.changed(true);
-    this.sendJson({ t: 'start', id: t.id, name: t.name, size: t.size, mime: file.type || 'application/octet-stream' });
     const chunk = LIMITS.fileChunkBytes - 4;
     let offset = 0;
     let lastTick = Date.now();
@@ -231,6 +268,7 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
       }
       if (!m || typeof m.id !== 'number') return;
       if (m.t === 'start') void this.onStart(m);
+      else if (m.t === 'accept') this.awaiting.get(m.id)?.(true);
       else if (m.t === 'end') this.onEnd(m.id);
       else if (m.t === 'ack') this.onAck(m.id);
       else if (m.t === 'reject') this.onRemoteCancel(m.id, 'failed', m.reason ?? 'Refused by the other side');
@@ -241,6 +279,11 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     const id = new DataView(data).getUint32(0);
     const inc = this.incoming.get(id);
     if (!inc) return;
+    if (!inc.sink) {
+      // Data before we accepted the file: the sender is not following the protocol.
+      this.failIncoming(id, 'The file was sent before it was accepted');
+      return;
+    }
     const chunk = new Uint8Array(data, 4);
     inc.transfer.transferred += chunk.length;
     if (inc.transfer.transferred > inc.transfer.size) {
@@ -253,9 +296,9 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
       this.failIncoming(id, 'The file arrived faster than it could be saved');
       return;
     }
-    // Evaluate the sink lazily: the first chunks can arrive before the sink is open.
+    const sink = inc.sink;
     inc.chain = inc.chain
-      .then(() => inc.sink?.write(chunk))
+      .then(() => sink.write(chunk))
       .then(() => void (inc.pending -= chunk.length))
       .catch((err) => this.failIncoming(id, (err as Error).message));
     const now = Date.now();
@@ -267,43 +310,70 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
 
   private async onStart(m: Extract<Msg, { t: 'start' }>): Promise<void> {
     if (this.incoming.has(m.id) || this.transfers.has(m.id)) return;
+    // Refusals are not recorded: a peer must not be able to flood the transfer list.
+    if (!this.allowReceive()) return this.sendJson({ t: 'reject', id: m.id, reason: 'File transfer is not allowed' });
+    if (this.incoming.size >= MAX_INCOMING) return this.sendJson({ t: 'reject', id: m.id, reason: 'Too many files at once. Try again in a moment.' });
+    this.trim();
     const transfer: Transfer = {
       id: m.id,
       direction: 'receive',
       name: sanitizeFileName(m.name),
-      size: Math.max(0, Number(m.size) || 0),
+      size: Math.max(0, Math.floor(Number(m.size)) || 0),
       transferred: 0,
-      state: 'active',
+      state: 'queued',
       startedAt: Date.now(),
       rate: 0,
     };
-    // Register synchronously so that chunks arriving while the sink opens are queued.
-    let resolveSink!: (s: FileSink | null) => void;
-    const sinkReady = new Promise<FileSink | null>((r) => (resolveSink = r));
-    const entry = { transfer, sink: null as FileSink | null, chain: sinkReady.then(() => undefined), pending: 0 };
+    const meta: FileMeta = { id: m.id, name: transfer.name, size: transfer.size, mime: String(m.mime || '').slice(0, 128) };
+    const entry = { transfer, sink: null as FileSink | null, chain: Promise.resolve(), pending: 0 };
     this.incoming.set(m.id, entry);
     this.transfers.set(m.id, transfer);
     this.changed(true);
+    let allowed = true;
+    if (this.consent) {
+      try {
+        allowed = await this.consent(meta);
+      } catch {
+        allowed = false;
+      }
+    }
     let sink: FileSink | null = null;
-    try {
-      sink = this.allowReceive() ? await this.sinkFactory({ id: m.id, name: transfer.name, size: transfer.size, mime: String(m.mime || '') }) : null;
-    } catch {
-      sink = null;
+    if (allowed && this.incoming.get(m.id) === entry && this.allowReceive()) {
+      try {
+        sink = await this.sinkFactory(meta);
+      } catch {
+        sink = null;
+      }
     }
     if (this.incoming.get(m.id) !== entry) {
-      // Cancelled (or the session ended) while the sink was opening: release it.
+      // Cancelled (or the session ended) while we were asking or opening the file: release it.
       sink?.abort();
-      resolveSink(null);
+      return;
+    }
+    if (!sink) {
+      this.incoming.delete(m.id);
+      transfer.state = allowed ? 'failed' : 'cancelled';
+      transfer.error = !allowed ? 'Declined' : this.allowReceive() ? 'Could not save the file' : 'File transfer is not allowed';
+      this.sendJson({ t: 'reject', id: m.id, reason: allowed ? transfer.error : 'Declined by the other side' });
+      this.changed(true);
       return;
     }
     entry.sink = sink;
-    resolveSink(sink);
-    if (!sink) {
-      this.incoming.delete(m.id);
-      transfer.state = 'failed';
-      transfer.error = this.allowReceive() ? 'Could not save the file' : 'File transfer is not allowed';
-      this.sendJson({ t: 'reject', id: m.id, reason: transfer.error });
-      this.changed(true);
+    transfer.state = 'active';
+    transfer.startedAt = Date.now();
+    this.sendJson({ t: 'accept', id: m.id });
+    this.changed(true);
+  }
+
+  /** Forgets the oldest finished transfers once the list gets long. */
+  private trim(): void {
+    if (this.transfers.size < MAX_RECORDS) return;
+    for (const [id, t] of this.transfers) {
+      if (this.transfers.size < MAX_RECORDS) break;
+      if (t.state !== 'active' && t.state !== 'queued') {
+        this.transfers.delete(id);
+        this.cancelled.delete(id);
+      }
     }
   }
 
@@ -340,6 +410,7 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     if (!t || t.state === 'done') return;
     this.cancelled.add(id);
     this.outgoing = this.outgoing.filter((o) => o.transfer.id !== id);
+    this.awaiting.get(id)?.(false);
     const inc = this.incoming.get(id);
     if (inc) {
       inc.sink?.abort();
@@ -370,6 +441,8 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     }
     for (const inc of this.incoming.values()) inc.sink?.abort();
     this.incoming.clear();
+    for (const resolve of this.awaiting.values()) resolve(false);
+    this.awaiting.clear();
     this.outgoing = [];
     this.changed(true);
   }

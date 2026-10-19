@@ -28,7 +28,7 @@ import {
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
-import { SettingsStore } from './store.ts';
+import { secureStorageAvailable, SettingsStore } from './store.ts';
 import { handleInput, inputAvailable, isWayland, releaseAll } from './input.ts';
 import { abortAll, abortFile, closeFile, createdFiles, openFile, writeFile } from './files.ts';
 import { adminConfig, lockScreen, openPermissionSettings, permissions, setLaunchAtLogin, startedHidden } from './system.ts';
@@ -38,7 +38,36 @@ declare const __BEAMDESK_SERVER__: string;
 const ORIGIN = 'app://beamdesk';
 const WEB_DIR = path.join(__dirname, '..', 'web');
 const ICON = path.join(__dirname, '..', 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
-const DEV_URL = process.env.BEAMDESK_DEV_URL;
+// Development only: a packaged app never loads its UI (and bridge) from anywhere else.
+const DEV_URL = app.isPackaged ? undefined : process.env.BEAMDESK_DEV_URL;
+const DEV_ORIGIN = DEV_URL ? new URL(DEV_URL).origin : null;
+
+/** Exact origin comparison (a prefix check would accept "app://beamdesk.evil" or "localhost:5173.evil"). */
+function ownOrigin(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'app:') return u.host === 'beamdesk';
+    return !!DEV_ORIGIN && u.origin === DEV_ORIGIN;
+  } catch {
+    return false;
+  }
+}
+
+const APP_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob: mediastream:",
+  // The signaling server is user-configurable (ws:// on a LAN, wss:// on the internet).
+  "connect-src 'self' ws: wss: http: https:",
+  "font-src 'self' data:",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+].join('; ');
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, codeCache: true } },
@@ -77,7 +106,19 @@ let pendingLinks: string[] = [];
 let rendererReady = false;
 let trayStatus = { id: '', sessions: 0, online: false };
 let blocker: number | null = null;
-let downloadsDir = (store.get<string>('downloadsDir') ?? '') || path.join(app.getPath('downloads'), 'BeamDesk');
+/** Number of hosted sessions that currently allow remote control (reported with the session bar). */
+let controlSessions = 0;
+let hadSessions = false;
+
+function validDir(p: unknown): string | null {
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return null;
+  try {
+    return fs.statSync(p).isDirectory() ? p : null;
+  } catch {
+    return null;
+  }
+}
+let downloadsDir = validDir(store.get<string>('downloadsDir')) ?? path.join(app.getPath('downloads'), 'BeamDesk');
 
 const minimizeToTray = () => (store.get<Record<string, unknown>>('settings')?.minimizeToTray ?? true) !== false;
 
@@ -136,6 +177,11 @@ function createMainWindow(): void {
   main.webContents.on('render-process-gone', (_e, d) => {
     console.error('[main] renderer gone', d.reason);
     releaseAll();
+    // The sessions died with the renderer, which can no longer lock the screen as configured.
+    if (hadSessions && store.get<Record<string, unknown>>('settings')?.lockOnEnd) void lockScreen();
+    controlSessions = 0;
+    hadSessions = false;
+    bar?.hide();
     rendererReady = false;
     if (!quitting) main?.reload();
   });
@@ -227,8 +273,9 @@ function createTray(): void {
 
 /** Only our own UI may use the bridge. */
 function trusted(e: IpcMainEvent | IpcMainInvokeEvent): boolean {
-  const url = e.senderFrame?.url ?? '';
-  return url.startsWith(`${ORIGIN}/`) || (!!DEV_URL && url.startsWith(DEV_URL));
+  const frame = e.senderFrame;
+  // Top-level frames of our own windows only.
+  return !!frame && frame.parent === null && ownOrigin(frame.url);
 }
 
 function registerIpc(): void {
@@ -244,11 +291,14 @@ function registerIpc(): void {
 
   on('store:load', (e) => (e.returnValue = store.load()));
   on('store:set', (_e, key, value) => {
+    // Where files are written is decided in the main process (folder picker) only: a page that
+    // could set it could drop received files into e.g. the Startup folder.
+    if (key === 'downloadsDir') return;
     store.set(key, value);
     if (key === 'settings' && value && typeof value === 'object') setLaunchAtLogin(!!(value as any).launchAtLogin);
   });
   on('store:secret', (_e, key, value) => store.setSecret(key, value));
-  on('app:info', (e) => (e.returnValue = { version: app.getVersion(), os: process.platform, defaultServer, wayland: isWayland, inputAvailable: inputAvailable() }));
+  on('app:info', (e) => (e.returnValue = { version: app.getVersion(), os: process.platform, defaultServer, wayland: isWayland, inputAvailable: inputAvailable(), secureStorage: secureStorageAvailable() }));
 
   handle('displays', async () => {
     const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
@@ -267,7 +317,10 @@ function registerIpc(): void {
     });
   });
 
-  on('input', (_e, displayId, cmd) => handleInput(displayId, cmd));
+  // Input is only injected while a session that allows control is shown in the session bar.
+  on('input', (_e, displayId, cmd) => {
+    if (cmd?.k === 'release' || controlSessions > 0) handleInput(displayId, cmd);
+  });
 
   handle('clipboard:read', () => clipboard.readText());
   handle('clipboard:write', (_e, text) => {
@@ -296,8 +349,11 @@ function registerIpc(): void {
     updateTray();
   });
   on('session-bar', (_e, state) => {
-    const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+    const sessions = (Array.isArray(state?.sessions) ? state.sessions : []).slice(0, 32);
+    controlSessions = sessions.filter((s: { control?: unknown }) => s?.control === true).length;
+    if (!controlSessions) releaseAll();
     if (sessions.length) {
+      hadSessions = true;
       bar ??= createSessionBar();
       const send = () => bar?.webContents.send('session-bar:state', { sessions });
       if (bar.webContents.isLoading()) bar.webContents.once('did-finish-load', send);
@@ -305,6 +361,7 @@ function registerIpc(): void {
       bar.showInactive();
       blocker ??= powerSaveBlocker.start('prevent-display-sleep');
     } else {
+      hadSessions = false;
       bar?.hide();
       releaseAll();
       if (blocker !== null) powerSaveBlocker.stop(blocker);
@@ -344,8 +401,8 @@ function registerIpc(): void {
 function hardenSessions(): void {
   const ses = session.defaultSession;
   const allowed = new Set(['media', 'display-capture', 'clipboard-read', 'clipboard-sanitized-write', 'notifications', 'fullscreen', 'pointerLock', 'keyboardLock']);
-  ses.setPermissionRequestHandler((wc, permission, cb) => cb(allowed.has(permission) && wc.getURL().startsWith(ORIGIN)));
-  ses.setPermissionCheckHandler((_wc, permission, origin) => allowed.has(permission) && (origin.startsWith(ORIGIN) || (!!DEV_URL && origin.startsWith(new URL(DEV_URL).origin))));
+  ses.setPermissionRequestHandler((wc, permission, cb) => cb(allowed.has(permission) && ownOrigin(wc.getURL())));
+  ses.setPermissionCheckHandler((_wc, permission, origin) => allowed.has(permission) && ownOrigin(origin));
   ses.on('will-download', (_e, item) => {
     // Screenshots and recordings go straight to the downloads folder.
     fs.mkdirSync(downloadsDir, { recursive: true });
@@ -361,7 +418,10 @@ function hardenSessions(): void {
 
 app.on('web-contents-created', (_e, contents) => {
   contents.on('will-navigate', (e, url) => {
-    if (!url.startsWith(ORIGIN) && !(DEV_URL && url.startsWith(DEV_URL))) e.preventDefault();
+    if (!ownOrigin(url)) e.preventDefault();
+  });
+  contents.on('will-redirect', (e, url) => {
+    if (!ownOrigin(url)) e.preventDefault();
   });
   contents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
@@ -409,6 +469,8 @@ void app.whenReady().then(() => {
     if (!res || !res.ok) return new Response('Not found', { status: 404 });
     const headers = new Headers(res.headers);
     headers.set('X-Content-Type-Options', 'nosniff');
+    // The UI has the native bridge: no inline or remote code, ever.
+    headers.set('Content-Security-Policy', APP_CSP);
     return new Response(res.body, { status: 200, headers });
   });
   hardenSessions();

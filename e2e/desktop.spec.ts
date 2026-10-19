@@ -53,13 +53,17 @@ test('desktop host: password login, remote mouse, clipboard and files', async ({
     await viewer.keyboard.press('Control+V');
     await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText())).toBe('hello from the viewer');
 
-    // Files land in the host's download folder.
+    // Files land in the host's download folder. A file type that can run code (.bin) is only
+    // saved after the person at the host agrees.
     await viewer.locator('.viewer input[type=file]').setInputFiles({ name: 'report.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(250_000, 7) });
+    await expect(win.getByText('can run programs on your computer')).toBeVisible();
+    await win.getByTestId('file-accept').click();
     await expect(viewer.getByText('Delivered')).toBeVisible();
     const saved = [path.join(home, 'Downloads', 'BeamDesk', 'report.bin'), path.join(home, 'BeamDesk', 'report.bin')].find((p) => fs.existsSync(p));
     expect(saved && fs.statSync(saved).size).toBe(250_000);
 
-    // Ending the session rotates the one-time password.
+    // The one-time password was spent when the session started; it stays hidden while connected.
+    await expect(win.getByTestId('otp-hidden')).toBeVisible();
     await viewer.getByTestId('disconnect').click();
     await expect(win.getByText('Someone is connected to this device')).toHaveCount(0);
     await expect(win.getByTestId('otp')).not.toHaveText(new RegExp(otp.split('').join('\\s?')));

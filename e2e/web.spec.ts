@@ -30,9 +30,11 @@ test('approve a request, chat and receive a file', async ({ browser }) => {
   await host.getByLabel('Message').press('Enter');
   await expect(viewer.locator('.bubble.them')).toHaveText(/Yes!/);
 
-  // Host sends a file; the viewer's browser downloads it.
+  // Host sends a file; the viewer agrees to save it and the browser downloads it.
   const download = viewer.waitForEvent('download');
   await host.locator('.hosted-row input[type=file]').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello '.repeat(50_000)) });
+  await expect(viewer.getByText('wants to send you a file')).toBeVisible();
+  await viewer.getByTestId('file-accept').click();
   const d = await download;
   expect(d.suggestedFilename()).toBe('notes.txt');
   expect(fs.statSync(await d.path()).size).toBe(300_000);

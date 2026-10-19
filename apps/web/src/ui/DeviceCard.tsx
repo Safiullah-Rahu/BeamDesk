@@ -4,6 +4,7 @@ import { formatId, formatOneTimePassword } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
 import {
   hasPermanentPassword,
+  hosted,
   inviteLink,
   myId,
   otp,
@@ -46,6 +47,8 @@ export function DeviceCard() {
   const web = platform.kind === 'web';
   const accepting = sharing.value && s.access !== 'off';
   const showOtp = accepting && s.oneTimePassword && !!otp.value;
+  // Whoever is connected sees this screen (and may share its clipboard): keep the next password from them.
+  const inSession = hosted.value.length > 0;
 
   return (
     <section class="card device-card" aria-labelledby="device-title">
@@ -63,16 +66,23 @@ export function DeviceCard() {
       {showOtp && (
         <>
           <div class="field-label">One-time password</div>
-          <div class="otp-row">
-            <span class="otp" data-testid="otp">{revealed ? formatOneTimePassword(otp.value) : '••• •••'}</span>
-            <IconButton label={revealed ? 'Hide password' : 'Show password'} onClick={() => setRevealed(!revealed)}>
-              {revealed ? <EyeOff size={18} /> : <Eye size={18} />}
-            </IconButton>
-            <IconButton label="New password" onClick={() => void rotateOtp()}>
-              <RefreshCw size={18} />
-            </IconButton>
-            <CopyButton text={otp.value} label="Copy password" what="Password copied" />
-          </div>
+          {inSession ? (
+            <div class="otp-row">
+              <span class="otp muted" data-testid="otp-hidden">••• •••</span>
+              <span class="hint">Hidden while someone is connected</span>
+            </div>
+          ) : (
+            <div class="otp-row">
+              <span class="otp" data-testid="otp">{revealed ? formatOneTimePassword(otp.value) : '••• •••'}</span>
+              <IconButton label={revealed ? 'Hide password' : 'Show password'} onClick={() => setRevealed(!revealed)}>
+                {revealed ? <EyeOff size={18} /> : <Eye size={18} />}
+              </IconButton>
+              <IconButton label="New password" onClick={() => void rotateOtp()}>
+                <RefreshCw size={18} />
+              </IconButton>
+              <CopyButton text={otp.value} label="Copy password" what="Password copied" />
+            </div>
+          )}
         </>
       )}
 
@@ -85,7 +95,7 @@ export function DeviceCard() {
         </div>
       ) : (
         <div class="row-actions">
-          <Button icon={<Share2 size={18} />} onClick={() => copyText(inviteLink(true), 'Invite link copied')}>
+          <Button icon={<Share2 size={18} />} onClick={() => copyText(inviteLink(!inSession), 'Invite link copied')}>
             Copy invite link
           </Button>
           {web && (

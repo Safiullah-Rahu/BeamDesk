@@ -5,7 +5,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopBridge } from '@beamdesk/core/bridge';
 
-const info = ipcRenderer.sendSync('app:info') as { version: string; os: string; defaultServer: string; wayland: boolean; inputAvailable: boolean };
+const info = ipcRenderer.sendSync('app:info') as { version: string; os: string; defaultServer: string; wayland: boolean; inputAvailable: boolean; secureStorage: boolean };
 const os = info.os === 'win32' ? 'windows' : info.os === 'darwin' ? 'macos' : 'linux';
 
 function listen<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -19,6 +19,7 @@ const bridge: DesktopBridge = {
   os,
   defaultServer: info.defaultServer || '',
   wayland: info.wayland,
+  secureStorage: info.secureStorage,
   store: {
     load: () => ipcRenderer.sendSync('store:load'),
     set: (key, value) => ipcRenderer.send('store:set', key, value),

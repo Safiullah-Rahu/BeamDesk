@@ -66,7 +66,8 @@ const NAMED: Record<string, string> = {
 
 /** Maps KeyboardEvent.code to the host input driver's key name, or null if unsupported. */
 export function codeToKey(code: string): string | null {
-  if (NAMED[code]) return NAMED[code];
+  // Own properties only: "constructor" or "__proto__" from a peer must not resolve to anything.
+  if (Object.hasOwn(NAMED, code)) return NAMED[code];
   let m = /^Key([A-Z])$/.exec(code);
   if (m) return m[1].toLowerCase();
   m = /^Digit(\d)$/.exec(code);

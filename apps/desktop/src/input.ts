@@ -26,6 +26,18 @@ const wayland = process.platform === 'linux' && (process.env.XDG_SESSION_TYPE ==
 
 export const isWayland = wayland;
 
+/** macOS: presses Ctrl+Cmd+Q (Lock Screen). Returns false if it could not. */
+export function lockShortcut(): boolean {
+  if (!robot || process.platform !== 'darwin') return false;
+  try {
+    releaseAll();
+    robot.keyTap('q', ['control', 'command']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Remote control works when the native driver loaded and the session is not pure Wayland. */
 export function inputAvailable(): boolean {
   return !!robot && !wayland;

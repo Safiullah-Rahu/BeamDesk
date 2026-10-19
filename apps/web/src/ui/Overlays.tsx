@@ -1,8 +1,22 @@
 import { useEffect, useState } from 'preact/hooks';
-import { CircleCheck, Info, LifeBuoy, MonitorUp, ScreenShare, ShieldAlert, TriangleAlert, X } from 'lucide-preact';
-import { formatId, type Permissions } from '@beamdesk/core';
+import { CircleCheck, FileDown, Info, LifeBuoy, MonitorUp, ScreenShare, ShieldAlert, TriangleAlert, X } from 'lucide-preact';
+import { formatBytes, formatId, type Permissions } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
-import { confirmPendingLink, connect, dismissInvite, dismissToast, endHelp, help, hosted, invites, pendingLink, settingsOpen, startHelpSession, toasts } from '../state/app.ts';
+import {
+  confirmPendingLink,
+  connect,
+  dismissInvite,
+  dismissToast,
+  endHelp,
+  fileRequests,
+  help,
+  hosted,
+  invites,
+  pendingLink,
+  settingsOpen,
+  startHelpSession,
+  toasts,
+} from '../state/app.ts';
 import { Button, IconButton, Modal, Spinner, Switch } from './kit.tsx';
 import type { DesktopPermissions } from '../platform/types.ts';
 
@@ -69,7 +83,8 @@ export function HelpLanding() {
   const h = help.value;
   const desktop = platform.kind === 'desktop';
   const caps = platform.host.capabilities();
-  const [perms, setPerms] = useState<Permissions>({ control: desktop && caps.control, clipboard: desktop, files: true, audio: false });
+  // Only what is needed to look at the screen is on by default; the rest is an explicit choice.
+  const [perms, setPerms] = useState<Permissions>({ control: desktop && caps.control, clipboard: false, files: false, audio: false });
   if (!h) return null;
   const viewer = hosted.value[0];
 
@@ -101,6 +116,8 @@ export function HelpLanding() {
             </h3>
             <p>Click the button and choose what to share. {desktop ? '' : 'Nothing to install.'} Only continue if you know and trust this person.</p>
             {desktop && caps.control && <Switch label="Allow them to control my mouse and keyboard" checked={perms.control} onChange={(v) => setPerms({ ...perms, control: v })} />}
+            {caps.clipboard && <Switch label="Share my clipboard (copy & paste)" checked={perms.clipboard} onChange={(v) => setPerms({ ...perms, clipboard: v })} />}
+            {caps.files && <Switch label="Allow sending files to this device" checked={perms.files} onChange={(v) => setPerms({ ...perms, files: v })} />}
             {h.status === 'error' && <p class="warn-text">{h.error}</p>}
             {h.helperKey && (
               <Button variant="primary" size="lg" icon={h.status === 'starting' ? <Spinner /> : <ScreenShare size={20} />} disabled={h.status === 'starting'} onClick={() => void startHelpSession(perms)} data-testid="share-for-help">
@@ -111,6 +128,46 @@ export function HelpLanding() {
               <ShieldAlert size={14} /> Helper ID: {formatId(h.helperId)}
             </p>
           </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/** Incoming files are saved only after the user agreed (always for viewers, for risky types on hosts). */
+export function FileConsent() {
+  const req = fileRequests.value[0];
+  if (!req) return null;
+  return (
+    <Modal
+      title="Save this file?"
+      onClose={() => req.answer(false)}
+      footer={
+        <>
+          <span class="spacer" />
+          <Button onClick={() => req.answer(false)} data-testid="file-decline">
+            Decline
+          </Button>
+          <Button variant={req.risky ? 'danger' : 'primary'} onClick={() => req.answer(true)} data-testid="file-accept">
+            Save file
+          </Button>
+        </>
+      }
+    >
+      <div class="help-landing">
+        <span class="hero-icon">
+          <FileDown size={34} />
+        </span>
+        <h3>
+          <strong>{req.from}</strong> wants to send you a file
+        </h3>
+        <p>
+          <code>{req.name}</code> <span class="muted">({formatBytes(req.size)})</span>
+        </p>
+        {req.risky && (
+          <p class="warn-text">
+            <TriangleAlert size={14} /> This kind of file can run programs on your computer. Only save it if you asked for it and trust the sender.
+          </p>
         )}
       </div>
     </Modal>
@@ -173,6 +230,8 @@ export function SetupNotices() {
   }
   if (perm?.wayland) items.push({ text: 'You are using Wayland: screen sharing works, but remote control needs an X11 session (choose “Ubuntu on Xorg” at login).' });
   if (platform.desktop && !platform.desktop.inputAvailable() && platform.os !== 'macos') items.push({ text: 'Remote control is unavailable on this system; others can still view your screen.' });
+  if (platform.desktop && !platform.desktop.secureStorage)
+    items.push({ text: 'No system keyring was found, so this device’s key and saved passwords are stored without encryption. Install and unlock a keyring (e.g. GNOME Keyring or KWallet) to protect them.' });
   if (!items.length) return null;
   return (
     <div class="notices">

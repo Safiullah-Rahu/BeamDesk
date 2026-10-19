@@ -1,7 +1,28 @@
 /** Streams received files to disk: "<name>.part" while downloading, renamed when complete. */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { sanitizeFileName } from '@beamdesk/core/files';
+
+/**
+ * Shortcut and link files can act without being opened (Windows Explorer fetches their icons,
+ * which can leak the user's network credentials), and are never needed in remote support.
+ */
+const REFUSED = /\.(lnk|url|scf|library-ms|searchconnector-ms|settingcontent-ms|desktop|webloc|inetloc|fileloc|theme|themepack)$/i;
+
+/** Marks a received file as coming from the internet, so Windows/macOS warn before running it. */
+function markFromInternet(file: string): void {
+  try {
+    if (process.platform === 'win32') {
+      fs.writeFileSync(`${file}:Zone.Identifier`, '[ZoneTransfer]\r\nZoneId=3\r\n');
+    } else if (process.platform === 'darwin') {
+      const stamp = Math.floor(Date.now() / 1000).toString(16);
+      execFile('/usr/bin/xattr', ['-w', 'com.apple.quarantine', `0081;${stamp};BeamDesk;`, file], () => undefined);
+    }
+  } catch {
+    /* e.g. FAT32 has no alternate data streams */
+  }
+}
 
 interface Handle {
   stream: fs.WriteStream;
@@ -31,6 +52,7 @@ function uniquePath(dir: string, name: string): string {
 export function openFile(dir: string, name: unknown, size: unknown): number | null {
   if (handles.size >= MAX_OPEN) return null;
   const safe = sanitizeFileName(String(name ?? 'file'));
+  if (REFUSED.test(safe)) return null;
   const total = Number(size);
   if (!Number.isFinite(total) || total < 0) return null;
   try {
@@ -65,6 +87,7 @@ export async function closeFile(id: number): Promise<string> {
   handles.delete(id);
   await new Promise<void>((resolve, reject) => h.stream.end((err?: Error | null) => (err ? reject(err) : resolve())));
   await fs.promises.rename(h.partPath, h.finalPath);
+  markFromInternet(h.finalPath);
   createdFiles.add(h.finalPath);
   return h.finalPath;
 }

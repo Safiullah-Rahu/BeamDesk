@@ -9,7 +9,7 @@
  *  3. Peer <-> peer over encrypted WebRTC data channels: input, chat, clipboard, files.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const APP_VERSION = '1.0.0';
 
 /** Hard limits, enforced on both ends. */
@@ -100,7 +100,7 @@ export interface HostHello {
   v: number;
   /** Host identity public key (base64url). Its hash must equal the ID the viewer dialled. */
   pk: string;
-  /** Signature over hostTranscript(sid, ci, viewerId). */
+  /** Signature over hostTranscript(sid, ci, viewerId, {shares, canAsk}). */
   sig: string;
   name: string;
   platform: Platform;
@@ -150,9 +150,20 @@ export interface InviteData {
   platform: Platform;
   /** Free text such as "Please help me with my printer". */
   note?: string;
+  /** Token from the helper's help link: the helper only shows invites it asked for. */
+  token?: string;
 }
 
-export const hostTranscript = (sid: string, ci: string, viewerId: string) => `BeamDesk-host-v1|${sid}|${ci}|${viewerId}`;
+/** The password offer is signed too, so nobody in between can strip it (a downgrade to "just ask"). */
+export const hostTranscript = (sid: string, ci: string, viewerId: string, offer: Pick<HostHello, 'shares' | 'canAsk'>) =>
+  `BeamDesk-host-v2|${sid}|${ci}|${viewerId}|${offer.shares.otp ?? '-'}|${offer.shares.perm ?? '-'}|${+!!offer.canAsk}`;
+
+/** Keeps only well-formed CPace shares (base64url) from an untrusted hello. */
+export function cleanShares(shares: unknown): HostHello['shares'] {
+  const o = (shares && typeof shares === 'object' ? shares : {}) as Record<string, unknown>;
+  const ok = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{16,128}$/.test(v);
+  return { ...(ok(o.otp) ? { otp: o.otp } : {}), ...(ok(o.perm) ? { perm: o.perm } : {}) };
+}
 export const viewerTranscript = (sid: string, ci: string, hostId: string) => `BeamDesk-viewer-v1|${sid}|${ci}|${hostId}`;
 export const acceptTranscript = (sid: string, ci: string, viewerId: string, slot: string | null, p: Permissions) =>
   `BeamDesk-accept-v1|${sid}|${ci}|${viewerId}|${slot ?? '-'}|${+!!p.control}${+!!p.clipboard}${+!!p.files}${+!!p.audio}`;
@@ -278,14 +289,33 @@ export function parseControlMessage(raw: unknown): ControlMessage | null {
       return Array.isArray(m.keys) && m.keys.length <= 6 && m.keys.every((k: unknown) => str(k, 32)) ? m : null;
     case 'select-display':
       return str(m.id, 128) ? m : null;
-    case 'quality':
-      return m.q && typeof m.q === 'object' && ['speed', 'balanced', 'quality', 'custom'].includes(m.q.preset) ? m : null;
-    case 'displays':
-      return Array.isArray(m.list) && str(m.current, 128) ? m : null;
+    case 'quality': {
+      if (!m.q || typeof m.q !== 'object' || !['speed', 'balanced', 'quality', 'custom'].includes(m.q.preset)) return null;
+      // Clamp custom values: they end up in encoder parameters.
+      const q: QualitySettings = { preset: m.q.preset };
+      if (num(m.q.fps)) q.fps = Math.round(Math.min(60, Math.max(1, m.q.fps)));
+      if (num(m.q.kbps)) q.kbps = Math.round(Math.min(50_000, Math.max(100, m.q.kbps)));
+      if (num(m.q.scale)) q.scale = Math.min(4, Math.max(1, m.q.scale));
+      return { t: 'quality', q };
+    }
+    case 'displays': {
+      if (!Array.isArray(m.list) || !str(m.current, 128)) return null;
+      const list: DisplayInfo[] = m.list
+        .slice(0, 16)
+        .filter((d: any) => d && typeof d === 'object' && str(d.id, 128))
+        .map((d: any) => ({
+          id: d.id,
+          name: sanitizeName(d.name, 'Display'),
+          width: num(d.width) ? Math.max(0, Math.min(16_384, Math.round(d.width))) : 0,
+          height: num(d.height) ? Math.max(0, Math.min(16_384, Math.round(d.height))) : 0,
+          primary: d.primary === true,
+        }));
+      return { t: 'displays', list, current: m.current };
+    }
     case 'perms':
-      return m.perms && typeof m.perms === 'object' ? m : null;
+      return m.perms && typeof m.perms === 'object' ? { t: 'perms', perms: normalizePermissions(m.perms) } : null;
     case 'notice':
-      return str(m.text, 500) ? m : null;
+      return str(m.text, 300) ? { t: 'notice', level: m.level === 'warn' ? 'warn' : 'info', text: sanitizeText(m.text) } : null;
     case 'chat':
       return str(m.text, LIMITS.chatChars) ? m : null;
     case 'clip':
@@ -294,11 +324,32 @@ export function parseControlMessage(raw: unknown): ControlMessage | null {
     case 'pong':
       return num(m.ts) ? m : null;
     case 'release-all':
+      return { t: 'release-all' };
     case 'bye':
-      return m;
+      return { t: 'bye', reason: typeof m.reason === 'string' && /^[a-z-]{1,32}$/.test(m.reason) ? m.reason : undefined };
     default:
       return null;
   }
+}
+
+/** Only real booleans count: `"control": "yes"` from a peer is not a grant. */
+export function normalizePermissions(p: unknown): Permissions {
+  const o = (p && typeof p === 'object' ? p : {}) as Record<string, unknown>;
+  return { control: o.control === true, clipboard: o.clipboard === true, files: o.files === true, audio: o.audio === true };
+}
+
+const PLATFORMS: readonly Platform[] = ['windows', 'macos', 'linux', 'web', 'android', 'ios', 'unknown'];
+
+export function sanitizePlatform(p: unknown): Platform {
+  return PLATFORMS.includes(p as Platform) ? (p as Platform) : 'unknown';
+}
+
+/** Session IDs are chosen by the viewer: restrict them so they can never alter a signed transcript. */
+export const isSessionId = (sid: unknown): sid is string => typeof sid === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(sid);
+
+/** Strips control and bidi characters from short free text received from a peer. */
+export function sanitizeText(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '').trim();
 }
 
 export function sanitizeName(name: unknown, fallback = 'Unknown device'): string {

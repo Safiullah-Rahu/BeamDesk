@@ -7,7 +7,7 @@ import { HostedSessions } from './HostedSessions.tsx';
 import { IncomingPrompts } from './IncomingPrompt.tsx';
 import { Viewer } from './Viewer.tsx';
 import { SettingsModal } from './Settings.tsx';
-import { HelpLanding, InviteBanners, LinkConfirm, NeedsServer, SetupNotices, Toasts } from './Overlays.tsx';
+import { FileConsent, HelpLanding, InviteBanners, LinkConfirm, NeedsServer, SetupNotices, Toasts } from './Overlays.tsx';
 import { IconButton } from './kit.tsx';
 import { useEvents } from './hooks.ts';
 import type { Tab } from '../state/app.ts';
@@ -95,6 +95,7 @@ export function App() {
       <IncomingPrompts />
       <HelpLanding />
       <LinkConfirm />
+      <FileConsent />
       <SettingsModal />
       <Toasts />
     </div>

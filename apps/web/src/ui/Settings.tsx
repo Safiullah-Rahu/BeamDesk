@@ -172,7 +172,7 @@ function Security() {
               ]}
             />
           </div>
-          <Switch label="New password after every session" hint="An old password can never be reused." checked={s.otpRotate === 'session'} onChange={(v) => updateSettings({ otpRotate: v ? 'session' : 'manual' })} />
+          <Switch label="New password after each use" hint="A password lets one person in once, then a new one is made." checked={s.otpRotate === 'session'} onChange={(v) => updateSettings({ otpRotate: v ? 'session' : 'manual' })} />
           <Switch label="Ask me even if the password is correct" checked={s.askEvenWithPassword} onChange={set('askEvenWithPassword')} />
         </>
       )}

@@ -158,3 +158,9 @@ export function normalizeServerUrl(input: string): { http: string; ws: string } 
   const ws = `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}${path}/ws`;
   return { http, ws };
 }
+
+/** Keeps chat history bounded however chatty the other side is. */
+export function pushChat<T>(list: T[], msg: T, max = 500): void {
+  list.push(msg);
+  if (list.length > max) list.splice(0, list.length - max);
+}

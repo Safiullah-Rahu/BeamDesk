@@ -25,10 +25,13 @@ import {
   acceptTranscript,
   APP_VERSION,
   encodePointerMove,
+  cleanShares,
   hostTranscript,
+  normalizePermissions,
   parseControlMessage,
   PROTOCOL_VERSION,
   sanitizeName,
+  sanitizePlatform,
   viewerTranscript,
   type AnswerData,
   type AuthResult,
@@ -44,11 +47,11 @@ import {
   VIEW_ONLY_PERMISSIONS,
 } from './protocol.ts';
 import { createPeer, describeConnectionError, minimiseLatency, sendControl, type PeerChannels } from './peer.ts';
-import { FileTransfers, type FileSinkFactory, type Transfer } from './files.ts';
+import { FileTransfers, type FileConsent, type FileSinkFactory, type Transfer } from './files.ts';
 import type { IncomingSignal, SignalingClient } from './signaling.ts';
 import { StatsSampler, type ConnectionStats } from './stats.ts';
 import { translateModifierCode } from './keymap.ts';
-import { Emitter, fromBase64Url, randomId, toBase64Url, utf8 } from './util.ts';
+import { Emitter, fromBase64Url, pushChat, randomId, toBase64Url, utf8 } from './util.ts';
 
 export type ViewerState = 'connecting' | 'authenticating' | 'waiting' | 'starting' | 'connected' | 'reconnecting' | 'closed';
 
@@ -71,6 +74,8 @@ export interface ViewerOptions {
   /** Translate Cmd <-> Ctrl between macOS and other systems. */
   swapCmdCtrl?: boolean;
   fileSink: FileSinkFactory;
+  /** Asked before a file from the other device is saved. */
+  fileConsent?: FileConsent;
 }
 
 export interface RemoteHostInfo {
@@ -126,7 +131,11 @@ export class ViewerSession extends Emitter<Events> {
   private remoteFingerprints = '';
   private isk: Partial<Record<PasswordSlot, Uint8Array>> = {};
   private accepted = false;
+  /** The user gave a password and the host's key is not otherwise known: the host must prove it knows it. */
+  private needsPasswordProof = false;
   private pendingIce: RTCIceCandidateInit[] = [];
+  /** Our own candidates, held back until the host has proven its identity (they reveal our IP). */
+  private localIce: RTCIceCandidateInit[] | null = [];
   private offs: (() => void)[] = [];
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -141,7 +150,7 @@ export class ViewerSession extends Emitter<Events> {
     super();
     this.opts = opts;
     this.hostId = opts.hostId;
-    this.files = new FileTransfers(opts.fileSink, () => this.perms.files);
+    this.files = new FileTransfers(opts.fileSink, () => this.accepted && this.perms.files, opts.fileConsent ?? null);
     this.files.on('update', (list) => this.emit('transfers', list));
     this.files.on('received', (t) => this.emit('file-received', t));
   }
@@ -192,7 +201,10 @@ export class ViewerSession extends Emitter<Events> {
       this.emit('stream', this.stream);
     };
     pc.onicecandidate = (e) => {
-      if (e.candidate) this.signal('ice', e.candidate.toJSON());
+      if (!e.candidate) return;
+      const c = e.candidate.toJSON();
+      if (!this.localIce) this.signal('ice', c);
+      else if (this.localIce.length < 64) this.localIce.push(c);
     };
     pc.onconnectionstatechange = () => this.onConnectionState();
 
@@ -275,7 +287,7 @@ export class ViewerSession extends Emitter<Events> {
     if (!t) return;
     const msg: ChatMessage = { from: 'me', text: t, ts: Date.now() };
     if (this.control({ t: 'chat', text: t, ts: msg.ts })) {
-      this.chat.push(msg);
+      pushChat(this.chat, msg);
       this.emit('chat', msg);
     }
   }
@@ -332,6 +344,8 @@ export class ViewerSession extends Emitter<Events> {
           await this.onAnswer(s.data as AnswerData);
           break;
         case 'pending':
+          // Only meaningful right after we authenticated (not a way to stall a live session).
+          if (this.state !== 'authenticating') break;
           this.setState('waiting');
           this.after(70_000, () => {
             if (this.state === 'waiting') this.close('timeout');
@@ -347,7 +361,9 @@ export class ViewerSession extends Emitter<Events> {
           }
           break;
         case 'bye':
-          this.finish(typeof s.data?.reason === 'string' && s.data.reason !== 'local' ? s.data.reason : 'remote-closed');
+          // Once the encrypted channel is up, only a goodbye on it counts: the server cannot end sessions.
+          if (this.channels?.control.readyState === 'open') break;
+          this.finish(typeof s.data?.reason === 'string' && /^[a-z-]{1,32}$/.test(s.data.reason) && s.data.reason !== 'local' ? s.data.reason : 'remote-closed');
           break;
       }
     } catch (err) {
@@ -377,7 +393,13 @@ export class ViewerSession extends Emitter<Events> {
 
     // 1. Is this really the device behind the ID we dialled?
     const me = this.opts.signaling.id;
-    if (!publicKeyMatchesId(hello.pk, this.hostId) || !verifySignature(hello.pk, utf8(hostTranscript(this.sid, this.ci, me)), hello.sig)) {
+    const offered = cleanShares(hello.shares);
+    if (
+      typeof hello.pk !== 'string' ||
+      typeof hello.sig !== 'string' ||
+      !publicKeyMatchesId(hello.pk, this.hostId) ||
+      !verifySignature(hello.pk, utf8(hostTranscript(this.sid, this.ci, me, { shares: offered, canAsk: hello.canAsk === true })), hello.sig)
+    ) {
       return this.close('bad-identity');
     }
     if (this.opts.expectedKeyHash && keyHash(hello.pk) !== this.opts.expectedKeyHash) {
@@ -386,13 +408,24 @@ export class ViewerSession extends Emitter<Events> {
     if (this.opts.pinnedKey && this.opts.pinnedKey !== hello.pk && !this.opts.acceptNewKey) {
       return this.close('identity-changed');
     }
+    const password = this.opts.password?.trim();
+    // A password is how the user recognises a device they have never connected to: if the
+    // device cannot take part in the password exchange, we cannot tell it apart from an impostor.
+    const keyKnown = !!this.opts.expectedKeyHash || (!!this.opts.pinnedKey && this.opts.pinnedKey === hello.pk);
+    this.needsPasswordProof = !!password && !keyKnown;
+    if (this.needsPasswordProof && !PASSWORD_SLOTS.some((slot) => offered[slot])) {
+      return this.close('password-unavailable');
+    }
     this.remoteFingerprints = fingerprintKey(clean);
-    // The host is verified: now its candidates may be used.
+    // The host is verified: now its candidates may be used, and ours may be revealed to it.
     for (const c of [...candidates, ...this.pendingIce.splice(0)]) await pc.addIceCandidate(c).catch(() => undefined);
+    const mine = this.localIce ?? [];
+    this.localIce = null;
+    for (const c of mine) this.signal('ice', c);
     this.host = {
       id: this.hostId,
       name: sanitizeName(hello.name),
-      platform: hello.platform,
+      platform: sanitizePlatform(hello.platform),
       version: String(hello.version || ''),
       publicKey: hello.pk,
       caps: { control: !!hello.caps?.control, audio: !!hello.caps?.audio, files: !!hello.caps?.files, clipboard: !!hello.caps?.clipboard, multiDisplay: !!hello.caps?.multiDisplay },
@@ -404,10 +437,9 @@ export class ViewerSession extends Emitter<Events> {
     // 2. Password authentication (CPace), one parallel instance per slot the host offers.
     const shares: ViewerAuth['shares'] = {};
     const tags: ViewerAuth['tags'] = {};
-    const password = this.opts.password?.trim();
     if (password) {
       for (const slot of PASSWORD_SLOTS) {
-        const theirs = hello.shares?.[slot];
+        const theirs = offered[slot];
         if (typeof theirs !== 'string') continue;
         const prs = await derivePasswordSecret(slot, password, this.hostId);
         const st = cpaceStart(prs, this.ci, this.sid, slot);
@@ -434,21 +466,24 @@ export class ViewerSession extends Emitter<Events> {
     // Acceptance is only meaningful after we verified the host and sent our authentication,
     // and it must be signed by that host (the server cannot forge it).
     if (!this.host || (this.state !== 'authenticating' && this.state !== 'waiting')) return;
-    const perms: Permissions = { ...VIEW_ONLY_PERMISSIONS, ...r.perms };
+    const perms: Permissions = normalizePermissions(r.perms);
     const slot = r.slot === 'otp' || r.slot === 'perm' ? r.slot : null;
     if (typeof r.sig !== 'string' || !verifySignature(this.host.publicKey, utf8(acceptTranscript(this.sid, this.ci, this.opts.signaling.id, slot, perms)), r.sig)) {
       return this.close('bad-identity');
     }
-    if (r.slot) {
+    if (slot) {
       // Mutual authentication: the host must prove it knows the same password.
-      const isk = this.isk[r.slot];
+      const isk = this.isk[slot];
       if (!isk || typeof r.tag !== 'string' || !verifyConfirmation(isk, 'host', this.sid, this.ci, fromBase64Url(r.tag))) {
         return this.close('host-proof');
       }
+    } else if (this.needsPasswordProof) {
+      // We gave a password but were let in without one: whoever answered never proved they know it.
+      return this.close('host-proof');
     }
     this.accepted = true;
     if (this.host) {
-      this.host.via = r.slot ?? 'approval';
+      this.host.via = slot ?? 'approval';
       this.emit('host', this.host);
     }
     this.perms = perms;
@@ -464,6 +499,7 @@ export class ViewerSession extends Emitter<Events> {
   }
 
   private onControl(raw: unknown): void {
+    if (!this.accepted) return;
     const m = parseControlMessage(raw);
     if (!m) return;
     switch (m.t) {
@@ -473,12 +509,12 @@ export class ViewerSession extends Emitter<Events> {
         this.emit('displays', { list: this.displays, current: this.currentDisplay });
         break;
       case 'perms':
-        this.perms = { ...VIEW_ONLY_PERMISSIONS, ...m.perms };
+        this.perms = normalizePermissions(m.perms);
         this.emit('perms', this.perms);
         break;
       case 'chat': {
         const msg: ChatMessage = { from: 'them', text: m.text, ts: Date.now() };
-        this.chat.push(msg);
+        pushChat(this.chat, msg);
         this.emit('chat', msg);
         break;
       }
@@ -489,7 +525,7 @@ export class ViewerSession extends Emitter<Events> {
         }
         break;
       case 'notice':
-        this.emit('notice', { level: m.level === 'warn' ? 'warn' : 'info', text: m.text });
+        if (m.text) this.emit('notice', { level: m.level, text: m.text });
         break;
       case 'ping':
         this.control({ t: 'pong', ts: m.ts });

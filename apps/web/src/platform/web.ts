@@ -52,8 +52,12 @@ export function detectOs(): Platform {
   return 'web';
 }
 
+/** Browsers keep the whole file in memory until it is saved; larger files need the desktop app. */
+const MAX_BROWSER_FILE = 1024 * 1024 * 1024;
+
 /** Collects a received file in memory and hands it to the browser as a download. */
 export const blobDownloadSink: FileSinkFactory = (meta) => {
+  if (meta.size > MAX_BROWSER_FILE) return null;
   const parts: Uint8Array[] = [];
   const sink: FileSink = {
     write: (chunk) => void parts.push(chunk.slice()),

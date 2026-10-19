@@ -34,6 +34,8 @@ export interface DesktopExtras {
   downloadsDir(): string;
   chooseDownloadsDir(): Promise<string | null>;
   inputAvailable(): boolean;
+  /** False when secrets are stored without OS keychain protection. */
+  secureStorage: boolean;
   quit(): void;
 }
 

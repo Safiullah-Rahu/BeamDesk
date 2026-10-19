@@ -12,12 +12,15 @@ import {
   Identity,
   isKeyHash,
   keyHash,
+  isRiskyFileName,
   normalizeServerUrl,
   parseId,
   randomId,
+  sanitizeName,
   SignalingClient,
   toBase64Url,
   ViewerSession,
+  type FileMeta,
   type HostSession,
   type HostSettings,
   type IncomingRequest,
@@ -36,6 +39,8 @@ export interface Tab {
   session: ViewerSession;
   /** Shown in the tab strip; replaced by the host's name once known. */
   title: string;
+  /** Key hash from the link this tab was opened with; reconnects keep enforcing it. */
+  expectedKeyHash?: string;
 }
 
 export interface Toast {
@@ -58,8 +63,21 @@ export interface HelpRequest {
   /** Key hash from the help link: only that exact device is let in. */
   helperKey: string;
   helperName: string;
+  /** Token from the help link, echoed in the invite so the helper knows it asked for it. */
+  token?: string;
   status: 'idle' | 'starting' | 'waiting' | 'sharing' | 'error';
   error?: string;
+}
+
+/** An incoming file waiting for the user's decision. */
+export interface FileRequest {
+  id: number;
+  from: string;
+  name: string;
+  size: number;
+  /** Programs, scripts, installers, shortcuts. */
+  risky: boolean;
+  answer(ok: boolean): void;
 }
 
 const stored = platform.store;
@@ -86,6 +104,7 @@ export const hasPermanentPassword = signal(!!stored.secrets.permPrs);
 /** Browsers only accept incoming sessions while the user has chosen to share. */
 export const sharing = signal(platform.kind === 'desktop');
 export const help = signal<HelpRequest | null>(null);
+export const fileRequests = signal<FileRequest[]>([]);
 export const serverUrls = computed(() => normalizeServerUrl(settings.value.serverUrl || platform.defaultServer));
 export const needsServer = computed(() => !serverUrls.value);
 
@@ -174,6 +193,7 @@ export async function setSharing(on: boolean): Promise<void> {
   } else {
     sharing.value = false;
     platform.host.releasePreparedCapture?.();
+    host?.revokePreapprovals();
     host?.endAll('local');
     if (help.value) help.value = null;
   }
@@ -241,6 +261,7 @@ export function removeContact(id: string): void {
 
 const trustStore: TrustStore = {
   isTrusted: (id, pk) => trusted.value.some((t) => t.id === id && t.pk === pk),
+  isTrustedId: (id) => trusted.value.some((t) => t.id === id),
   isBlocked: (id) => blocked.value.some((b) => b.id === id),
   trust(id, pk, name) {
     trusted.value = [{ id, pk, name, added: Date.now() }, ...trusted.value.filter((t) => t.id !== id)];
@@ -292,13 +313,17 @@ function startSignaling(): void {
   });
   signaling.on('signal', (sig) => {
     if (sig.kind !== 'invite') return;
-    const name = typeof sig.data?.name === 'string' ? sig.data.name.slice(0, 64) : formatId(sig.from);
-    invites.value = [...invites.value.filter((i) => i.from !== sig.from), { sid: sig.sid, from: sig.from, name, note: sig.data?.note, at: Date.now() }];
+    // Only invites answering one of our own help links: anyone else could pose as "Support".
+    if (!helpTokenValid(sig.data?.token)) return;
+    const name = sanitizeName(sig.data?.name, formatId(sig.from));
+    const note = typeof sig.data?.note === 'string' ? sanitizeName(sig.data.note, '') : undefined;
+    invites.value = [...invites.value.filter((i) => i.from !== sig.from), { sid: sig.sid, from: sig.from, name, note, at: Date.now() }].slice(-5);
     if (settings.value.sounds) chime();
     platform.notify('Screen shared with you', `${name} wants to show you their screen.`);
     platform.attention();
   });
 
+  platform.host.fileConsent ??= hostFileConsent;
   host = new HostService({
     signaling,
     identity,
@@ -448,6 +473,8 @@ export function connect(rawId: string, opts: ConnectOptions = {}): string | null
     expectedKeyHash: opts.expectedKeyHash,
     swapCmdCtrl: s.swapCmdCtrl,
     fileSink: platform.viewerFileSink,
+    // Files from the device we are helping are never saved without asking.
+    fileConsent: (meta) => askFile(contact?.name ?? formatId(id), meta, true),
   });
   if (opts.viewOnly) session.viewOnly = true;
   session.on('host', (info) => {
@@ -459,12 +486,11 @@ export function connect(rawId: string, opts: ConnectOptions = {}): string | null
       upsertContact({ id, name: contact?.name && contact.name !== formatId(id) ? contact.name : session.host.name, pk: session.host.publicKey, platform: session.host.platform, lastConnected: Date.now() });
     }
   });
-  session.on('closed', ({ reason }) => {
-    if (reason === 'bad-password' && savedPassword(id)) rememberPassword(id, null);
-  });
+  // A saved password is never deleted automatically: a failure reason is not authenticated,
+  // so anyone on the path could otherwise wipe it. The user replaces it on the error screen.
   const key = `t-${randomId(6)}`;
   batch(() => {
-    tabs.value = [...tabs.value, { key, hostId: id, session, title: contact?.name ?? formatId(id) }];
+    tabs.value = [...tabs.value, { key, hostId: id, session, title: contact?.name ?? formatId(id), expectedKeyHash: opts.expectedKeyHash }];
     activeTab.value = key;
   });
   void session.start();
@@ -475,7 +501,7 @@ export function reconnect(key: string, opts: ConnectOptions = {}): void {
   const tab = tabs.value.find((t) => t.key === key);
   if (!tab) return;
   closeTab(key);
-  connect(tab.hostId, { viewOnly: tab.session.viewOnly, ...opts });
+  connect(tab.hostId, { viewOnly: tab.session.viewOnly, expectedKeyHash: tab.expectedKeyHash, ...opts });
 }
 
 export function closeTab(key: string): void {
@@ -504,10 +530,71 @@ export function inviteLink(includePassword: boolean): string {
 
 export function helpLink(): string {
   const base = serverUrls.value?.http ?? '';
-  return `${base}/#help=${myId.value}&n=${encodeURIComponent(settings.value.deviceName)}&k=${keyHash(myPublicKey.value)}`;
+  return `${base}/#help=${myId.value}&n=${encodeURIComponent(settings.value.deviceName)}&k=${keyHash(myPublicKey.value)}&t=${helpToken()}`;
 }
 
-export type Link = { type: 'connect'; id: string; password?: string; key?: string } | { type: 'help'; id: string; name?: string; key?: string };
+const HELP_TOKEN_TTL = 7 * 24 * 3600_000;
+
+interface HelpToken {
+  t: string;
+  created: number;
+}
+
+function helpTokens(): HelpToken[] {
+  const list = Array.isArray(stored.data.helpTokens) ? (stored.data.helpTokens as HelpToken[]) : [];
+  return list.filter((x) => typeof x?.t === 'string' && Date.now() - x.created < HELP_TOKEN_TTL);
+}
+
+/** Reuses a recent token so copying the link twice gives the same link. */
+function helpToken(): string {
+  const list = helpTokens();
+  const recent = list.find((x) => Date.now() - x.created < 3600_000);
+  if (recent) return recent.t;
+  const t = randomId(12);
+  stored.set('helpTokens', [{ t, created: Date.now() }, ...list].slice(0, 20));
+  return t;
+}
+
+function helpTokenValid(t: unknown): boolean {
+  return typeof t === 'string' && t.length <= 64 && helpTokens().some((x) => x.t === t);
+}
+
+// ------------------------------------------------------------------ incoming files
+
+const FILE_DECISION_TIMEOUT = 2 * 60_000;
+
+/** Asks the user whether to save a file from `from`. Unanswered requests are declined. */
+function askFile(from: string, meta: FileMeta, always: boolean): Promise<boolean> {
+  const risky = isRiskyFileName(meta.name);
+  if (!always && !risky) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let done = false;
+    const req: FileRequest = {
+      id: meta.id,
+      from,
+      name: meta.name,
+      size: meta.size,
+      risky,
+      answer(ok) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        fileRequests.value = fileRequests.value.filter((r) => r !== req);
+        resolve(ok);
+      },
+    };
+    const timer = setTimeout(() => req.answer(false), FILE_DECISION_TIMEOUT);
+    fileRequests.value = [...fileRequests.value, req];
+    platform.attention();
+  });
+}
+
+/** Host side: files the helper sends are only questioned when they could run code. */
+const hostFileConsent = (meta: FileMeta, from: string): Promise<boolean> => askFile(from, meta, false);
+
+export type Link =
+  | { type: 'connect'; id: string; password?: string; key?: string }
+  | { type: 'help'; id: string; name?: string; key?: string; token?: string };
 
 /** A connect link waiting for the user's confirmation (links never connect on their own). */
 export const pendingLink = signal<Extract<Link, { type: 'connect' }> | null>(null);
@@ -533,7 +620,9 @@ export function parseLink(raw: string): Link | null {
   const connectId = parseId(params.get('c') ?? (seg[0] === 'connect' ? seg[1] ?? '' : ''));
   if (connectId) return { type: 'connect', id: connectId, password: params.get('p')?.slice(0, 128) ?? undefined, key };
   const helpId = parseId(params.get('help') ?? (seg[0] === 'help' ? seg[1] ?? '' : ''));
-  if (helpId) return { type: 'help', id: helpId, name: params.get('n')?.slice(0, 64) ?? undefined, key };
+  const t = params.get('t');
+  const token = t && /^[A-Za-z0-9_-]{8,64}$/.test(t) ? t : undefined;
+  if (helpId) return { type: 'help', id: helpId, name: params.get('n') ? sanitizeName(params.get('n'), '') || undefined : undefined, key, token };
   return null;
 }
 
@@ -546,7 +635,7 @@ export async function handleLink(raw: string): Promise<void> {
     if (link.id !== myId.value) pendingLink.value = link;
   } else if (link.id !== myId.value) {
     help.value = link.key
-      ? { helperId: link.id, helperKey: link.key, helperName: link.name || formatId(link.id), status: 'idle' }
+      ? { helperId: link.id, helperKey: link.key, helperName: link.name || formatId(link.id), token: link.token, status: 'idle' }
       : { helperId: link.id, helperKey: '', helperName: link.name || formatId(link.id), status: 'error', error: 'This help link is incomplete. Ask your helper to send it again.' };
   }
 }
@@ -570,7 +659,7 @@ export async function startHelpSession(perms: Permissions): Promise<void> {
     sharing.value = true;
     syncHostSettings();
     host.preapprove(h.helperId, h.helperKey, perms);
-    const ok = signaling.send(h.helperId, randomId(), 'invite', { name: settings.value.deviceName, platform: platform.os });
+    const ok = signaling.send(h.helperId, randomId(), 'invite', { name: settings.value.deviceName, platform: platform.os, token: h.token });
     help.value = { ...h, status: ok ? 'waiting' : 'error', error: ok ? undefined : 'Not connected to the server.' };
   } catch (err) {
     platform.host.releasePreparedCapture?.();
@@ -579,6 +668,7 @@ export async function startHelpSession(perms: Permissions): Promise<void> {
 }
 
 export function endHelp(): void {
+  host?.revokePreapprovals();
   if (help.value?.status === 'sharing' || help.value?.status === 'waiting') {
     host?.endAll('local');
     if (platform.kind === 'web') void setSharing(false);

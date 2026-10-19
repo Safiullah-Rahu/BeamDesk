@@ -24,6 +24,19 @@ npmRebuild: false
 asarUnpack:
   - "**/node_modules/@jitsi/robotjs/**"
 
+# Electron fuses, flipped in the binary at build time. They switch off ways to make the signed
+# app run other code: as a plain Node.js (ELECTRON_RUN_AS_NODE), with NODE_OPTIONS or --inspect,
+# or with a modified app.asar.
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+
 protocols:
   - name: BeamDesk link
     schemes: [beamdesk]
@@ -65,7 +78,6 @@ mac:
       arch: [arm64, x64]
   extendInfo:
     NSScreenCaptureUsageDescription: BeamDesk shares your screen only with people you accept.
-    NSAppleEventsUsageDescription: BeamDesk uses this to let people you accept control your Mac.
     NSMicrophoneUsageDescription: BeamDesk does not use your microphone.
 
 dmg:

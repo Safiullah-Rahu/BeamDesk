@@ -13,6 +13,17 @@ interface FileShape {
   secrets: Record<string, string>;
 }
 
+/** True when secrets get real OS keychain protection (Linux may fall back to a hard-coded key). */
+export function secureStorageAvailable(): boolean {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  if (process.platform !== 'linux') return true;
+  try {
+    return safeStorage.getSelectedStorageBackend() !== 'basic_text';
+  } catch {
+    return false;
+  }
+}
+
 export class SettingsStore {
   private file = path.join(app.getPath('userData'), 'settings.json');
   private state: FileShape = { data: {}, secrets: {} };

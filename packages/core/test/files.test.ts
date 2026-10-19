@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FileTransfers, type FileSink, type Transfer } from '../src/files.ts';
+import { FileTransfers, isRiskyFileName, sanitizeFileName, type FileSink, type Transfer } from '../src/files.ts';
 
 /** A pair of in-memory "data channels" that behave enough like RTCDataChannel for FileTransfers. */
 class FakeChannel extends EventTarget {
@@ -86,7 +86,8 @@ test('files: receiver without permission rejects and the sender stops', async ()
   await waitFor(() => ['failed', 'done'].includes(sender.list()[0].state));
   assert.equal(sender.list()[0].state, 'failed');
   assert.match(sender.list()[0].error ?? '', /not allowed/);
-  assert.equal(receiver.list()[0].state, 'failed');
+  // Refusals leave no trace: a peer cannot flood the transfer list.
+  assert.equal(receiver.list().length, 0);
 });
 
 test('files: a sink that opens after the transfer was cancelled is released', async () => {
@@ -110,4 +111,77 @@ test('files: a sink that opens after the transfer was cancelled is released', as
   release();
   await waitFor(() => aborted === 1);
   assert.equal(receiver.list()[0].state, 'cancelled');
+});
+
+test('files: nothing is streamed until the receiver consents, and a decline stops the sender', async () => {
+  const [a, b] = FakeChannel.pair();
+  let opened = 0;
+  const asked: string[] = [];
+  let answer!: (ok: boolean) => void;
+  const sender = new FileTransfers(() => null, () => false);
+  const receiver = new FileTransfers(
+    () => {
+      opened++;
+      return null;
+    },
+    () => true,
+    (meta) => {
+      asked.push(meta.name);
+      return new Promise((r) => (answer = r));
+    },
+  );
+  let binaryFrames = 0;
+  b.addEventListener('message', (e) => {
+    if (typeof (e as MessageEvent).data !== 'string') binaryFrames++;
+  });
+  sender.attach(a as unknown as RTCDataChannel);
+  receiver.attach(b as unknown as RTCDataChannel);
+  sender.send([new File([new Uint8Array(500_000)], 'setup.exe')]);
+  await waitFor(() => asked.length === 1);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(binaryFrames, 0, 'no data before consent');
+  assert.equal(sender.list()[0].state, 'queued');
+  answer(false);
+  await waitFor(() => sender.list()[0].state !== 'queued');
+  assert.equal(sender.list()[0].state, 'failed');
+  assert.match(sender.list()[0].error ?? '', /Declined/);
+  assert.equal(receiver.list()[0].state, 'cancelled');
+  assert.equal(opened, 0, 'no file is created when the user declines');
+  assert.equal(binaryFrames, 0);
+});
+
+test('files: data sent before acceptance fails the transfer', async () => {
+  const [a, b] = FakeChannel.pair();
+  const writes: number[] = [];
+  const receiver = new FileTransfers(() => ({ write: (c) => void writes.push(c.length), close: () => undefined, abort: () => undefined }), () => true, () => new Promise(() => undefined));
+  receiver.attach(b as unknown as RTCDataChannel);
+  a.send(JSON.stringify({ t: 'start', id: 7, name: 'a.txt', size: 10, mime: 'text/plain' }));
+  const frame = new Uint8Array(14);
+  new DataView(frame.buffer).setUint32(0, 7);
+  a.send(frame);
+  await waitFor(() => receiver.list()[0]?.state === 'failed');
+  assert.deepEqual(writes, []);
+});
+
+test('files: at most four incoming files at once', async () => {
+  const [a, b] = FakeChannel.pair();
+  const replies: any[] = [];
+  a.addEventListener('message', (e) => replies.push(JSON.parse((e as MessageEvent).data)));
+  const receiver = new FileTransfers(() => null, () => true, () => new Promise(() => undefined));
+  receiver.attach(b as unknown as RTCDataChannel);
+  for (let id = 1; id <= 6; id++) a.send(JSON.stringify({ t: 'start', id, name: `f${id}`, size: 1, mime: '' }));
+  await waitFor(() => replies.length === 2);
+  assert.deepEqual(replies.map((r) => [r.t, r.id]), [['reject', 5], ['reject', 6]]);
+  assert.equal(receiver.list().length, 4);
+});
+
+test('files: names cannot hide their real type', () => {
+  assert.equal(sanitizeFileName('invoice.pdf          .exe'), 'invoice.pdf .exe');
+  assert.equal(sanitizeFileName('photo\u202egpj.exe'), 'photo_gpj.exe');
+  assert.equal(sanitizeFileName('../../etc/passwd'), 'passwd');
+  assert.ok(isRiskyFileName('invoice.pdf .exe'));
+  assert.ok(isRiskyFileName('Setup.MSI'));
+  assert.ok(isRiskyFileName('run.sh.'));
+  assert.ok(!isRiskyFileName('report.pdf'));
+  assert.ok(!isRiskyFileName('exe'));
 });

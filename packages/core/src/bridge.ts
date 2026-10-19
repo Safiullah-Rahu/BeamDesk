@@ -37,6 +37,8 @@ export interface DesktopBridge {
   os: 'windows' | 'macos' | 'linux';
   defaultServer: string;
   wayland: boolean;
+  /** Secrets are protected by the OS keychain (false: stored in plain text, e.g. no keyring on Linux). */
+  secureStorage: boolean;
   store: {
     load(): { data: Record<string, unknown>; secrets: Record<string, string> };
     set(key: string, value: unknown): void;

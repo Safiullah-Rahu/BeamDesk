@@ -114,6 +114,7 @@ export function createDesktopPlatform(bridge: DesktopBridge): AppPlatform {
       downloadsDir: () => bridge.downloadsDir(),
       chooseDownloadsDir: () => bridge.chooseDownloadsDir(),
       inputAvailable: () => inputOk,
+      secureStorage: bridge.secureStorage !== false,
       quit: () => bridge.quit(),
     },
   };
