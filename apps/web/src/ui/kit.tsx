@@ -1,10 +1,10 @@
 /** Small, accessible UI primitives. */
-import type { ComponentChildren, JSX } from 'preact';
+import type { ButtonHTMLAttributes, ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Check, Copy, X } from 'lucide-preact';
 import { toast } from '../state/app.ts';
 
-type ButtonProps = JSX.HTMLAttributes<HTMLButtonElement> & {
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
   size?: 'sm' | 'md' | 'lg';
   icon?: ComponentChildren;
@@ -21,7 +21,7 @@ export function Button({ variant = 'secondary', size = 'md', icon, children, cla
   );
 }
 
-export function IconButton({ label, children, active, class: cls, ...rest }: JSX.HTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean; disabled?: boolean }) {
+export function IconButton({ label, children, active, class: cls, ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean; disabled?: boolean }) {
   return (
     <button type="button" class={`icon-btn ${active ? 'active' : ''} ${cls ?? ''}`} aria-label={label} title={label} aria-pressed={active} {...rest}>
       {children}
@@ -54,7 +54,7 @@ export function Segmented<T extends string>({ value, options, onChange, label }:
 }
 
 export function Spinner({ size = 18 }: { size?: number }) {
-  return <span class="spinner" style={{ width: size, height: size }} aria-hidden="true" />;
+  return <span class="spinner" style={{ width: `${size}px`, height: `${size}px` }} aria-hidden="true" />;
 }
 
 export async function copyText(text: string, what = 'Copied'): Promise<void> {

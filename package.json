@@ -28,8 +28,8 @@
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@playwright/test": "1.56.1",
+    "@playwright/test": "1.64.1",
     "@types/node": "^22.10.0",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   }
 }
