@@ -1,6 +1,11 @@
 # Builds installers for Windows, macOS and Linux and attaches them to a GitHub release.
-# Trigger: push a tag like v1.0.0  (git tag v1.0.0 && git push origin v1.0.0)
-# "Run workflow" on the Actions tab builds the installers without publishing (artifacts only).
+#
+# Publish a release, either way:
+#   - Actions tab -> "Release desktop apps" -> Run workflow (branch: main), enter the version,
+#     e.g. v1.0.0. It must match "version" in package.json. The workflow builds the installers,
+#     then creates the tag and the release itself.
+#   - Or push a tag: git tag v1.0.0 && git push origin v1.0.0
+# Run workflow with the version left empty only builds the installers (downloadable artifacts).
 #
 # Optional repository settings (Settings -> Secrets and variables -> Actions):
 #   variable BEAMDESK_SERVER_URL   your server, baked into the apps so users never type it
@@ -15,13 +20,57 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, e.g. v1.0.0 (must match package.json). Leave empty to only build.'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  # Decides what gets published before anything is built, so a typo fails in seconds.
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$REF_TYPE" = tag ]; then tag="$REF_NAME"; else tag="$INPUT"; fi
+          if [ -n "$tag" ]; then
+            if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::The version must look like v1.2.3 (got '$tag')"; exit 1
+            fi
+            if [ "$tag" != "$expected" ]; then
+              echo "::error::Version $tag does not match package.json ($expected): update package.json first"; exit 1
+            fi
+            if [ "$REF_TYPE" != tag ]; then
+              if [ "$REF_NAME" != main ]; then echo "::error::Publish releases from main"; exit 1; fi
+              if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+                echo "::error::Tag $tag already exists: bump the version in package.json for a new release"; exit 1
+              fi
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing: ${tag:-nothing (build only)}"
+
   build:
     name: ${{ matrix.name }}
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -83,12 +132,14 @@ jobs:
 
   publish:
     name: Publish release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build]
+    if: needs.version.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+      # Starts the server image build for the new tag (tags created with this token start no workflows).
+      actions: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -101,10 +152,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ github.sha }}
+          FROM_TAG_PUSH: ${{ github.ref_type == 'tag' }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --title "BeamDesk $TAG" --generate-notes --verify-tag
+            # From "Run workflow" the tag does not exist yet: create it on the commit that was built.
+            gh release create "$TAG" dist/* --title "BeamDesk $TAG" --generate-notes --target "$SHA"
+          fi
+          if [ "$FROM_TAG_PUSH" != true ]; then
+            gh workflow run docker.yml --ref "$TAG"
           fi

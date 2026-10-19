@@ -193,7 +193,7 @@ ICE_SERVERS_JSON='[{"urls":"stun:stun.cloudflare.com:3478"},{"urls":["turn:turn.
 - **Desktop app:** Settings → Network → *Server address* → `desk.example.com` → **Save and reconnect**.
 - **Your own installers with the address built in** (best for non-technical users):
   1. In your fork on GitHub: Settings → Secrets and variables → Actions → **Variables** → add `BEAMDESK_SERVER_URL` = `https://desk.example.com`.
-  2. Push a tag: `git tag v1.0.0 && git push origin v1.0.0`.
+  2. On the **Actions** tab open **Release desktop apps** → **Run workflow**, and enter the version from `package.json` (e.g. `v1.0.0`). Pushing a tag (`git tag v1.0.0 && git push origin v1.0.0`) works too.
   3. The *Release desktop apps* workflow builds Windows, macOS and Linux installers and publishes them on your Releases page. Users install and see **Ready** — nothing to configure.
 - **Managed computers:** place a `beamdesk.json` file next to the BeamDesk executable, or in the app's data folder
   (`%APPDATA%\BeamDesk` on Windows, `~/Library/Application Support/BeamDesk` on macOS, `~/.config/BeamDesk` on Linux):
