@@ -56,4 +56,4 @@ Core TypeScript is consumed as source (no build step): Vite and esbuild bundle i
 
 1. Bump `version` in `apps/desktop/package.json` (and `APP_VERSION` in `packages/core/src/protocol.ts`).
 2. Update `CHANGELOG.md`.
-3. `git tag vX.Y.Z && git push origin vX.Y.Z` — GitHub Actions builds and publishes Windows, macOS and Linux installers, and the server image to GHCR.
+3. Actions tab → **Release desktop apps** → **Run workflow** on `main` with the version `vX.Y.Z` (or push the tag yourself: `git tag vX.Y.Z && git push origin vX.Y.Z`). GitHub Actions builds the Windows, macOS and Linux installers, creates the tag and the release with a `SHA256SUMS.txt`, and publishes the server image to GHCR.
