@@ -41,7 +41,10 @@ BeamDesk shows a yellow banner with an **Open Settings** button for each. Switch
 
 ## The two halves of the screen
 
-<img src="images/home-light.png" alt="BeamDesk home screen" width="760" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/home-dark.png" />
+  <img src="images/home-light.png" alt="BeamDesk home screen" width="760" />
+</picture>
 
 - **Left — This device.** Your **ID** (9 digits) and, on the desktop app, a **one-time password**. Give these to someone you trust so they can connect to *you*.
 - **Right — Connect to another device.** Type someone else's ID here to connect to *them*.
@@ -58,6 +61,11 @@ The pill in the corner tells you whether BeamDesk is **Ready**. If it says *Offl
 3. A window appears: **"… wants to connect"**. Check that it is the person you expect, then click **Accept**.
    - Untick *Control mouse & keyboard* if you only want them to watch.
 4. A red bar at the top of your screen shows that someone is connected. Click **Disconnect** on it at any time.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/incoming-request-dark.png" />
+  <img src="images/incoming-request-light.png" alt="The accept window: who is asking, what they may do, and the security code" width="600" />
+</picture>
 
 **Even faster:** click **Copy invite link** and send it by WhatsApp, e-mail or SMS. Your helper opens it, clicks **Connect**, and is in — the link contains your one-time password (which works once) and your device's security key, so it can only reach *your* computer.
 
@@ -85,7 +93,10 @@ Perfect for parents, grandparents or customers who should not have to install an
 3. They open it in Chrome, Edge, Firefox or Safari and click **Share my screen**, then choose the screen to share.
 4. You get a notification **"… is sharing their screen with you"** — click **Join now**.
 
-<img src="images/help-link.png" alt="What the person sees after opening a help link" width="600" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/help-link-dark.png" />
+  <img src="images/help-link-light.png" alt="What the person sees after opening a help link" width="600" />
+</picture>
 
 > In a browser, the person's screen can be **seen** but not controlled — browsers do not allow remote mouse/keyboard control.
 > Guide them with chat, or ask them to install the desktop app for full control.
@@ -94,7 +105,10 @@ Perfect for parents, grandparents or customers who should not have to install an
 
 ## During a session
 
-<img src="images/remote-session.png" alt="A remote session with the toolbar and connection details" width="760" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/remote-session-dark.png" />
+  <img src="images/remote-session-light.png" alt="A remote session with the toolbar and connection details" width="760" />
+</picture>
 
 The toolbar at the top of a session (hover over a button to see its name):
 
@@ -117,6 +131,11 @@ The toolbar at the top of a session (hover over a button to see its name):
 
 Files you receive are saved in **Downloads/BeamDesk** (change this in Settings → General). BeamDesk asks before saving a file the other side sends you — always when you are the helper, and for programs, scripts and installers when you are being helped. Only click **Save file** if you expected it.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/file-consent-dark.png" />
+  <img src="images/file-consent-light.png" alt="BeamDesk asks before saving a file from the other device" width="600" />
+</picture>
+
 ---
 
 ## Reach your own computer any time (unattended access)
@@ -130,11 +149,21 @@ For your own office or home PC, when nobody is sitting in front of it:
 
 Recommended extras: **Lock this computer when a session ends** (Settings → Security), and mark your own devices as trusted.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/settings-security-dark.png" />
+  <img src="images/settings-security-light.png" alt="Settings → Security: who can connect, one-time password, unattended access" width="600" />
+</picture>
+
 ---
 
 ## Using BeamDesk on a phone or tablet
 
 Open your BeamDesk server's address in the phone's browser and connect as usual.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/mobile-dark.png" />
+  <img src="images/mobile-light.png" alt="BeamDesk in a phone browser" width="280" />
+</picture>
 
 | Gesture | Does |
 |---|---|

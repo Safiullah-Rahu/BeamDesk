@@ -1,6 +1,6 @@
 {
   "name": "@beamdesk/core",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "BeamDesk shared protocol, cryptography and WebRTC session logic.",
   "license": "MIT",

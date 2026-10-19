@@ -1,6 +1,6 @@
 {
   "name": "beamdesk",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Open-source, end-to-end encrypted remote desktop. Desktop app + browser client + self-hostable server.",
   "license": "MIT",
@@ -25,6 +25,7 @@
     "typecheck": "tsc -p packages/core && tsc -p server && tsc -p apps/web && tsc -p apps/desktop",
     "test": "node --test --test-reporter=spec \"packages/core/test/*.test.ts\" \"server/test/*.test.ts\"",
     "test:e2e": "npm run build:web && npm run build -w server && playwright test -c e2e/playwright.config.ts",
+    "screenshots": "playwright test -c e2e/screenshots.config.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

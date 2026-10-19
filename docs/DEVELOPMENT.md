@@ -52,8 +52,20 @@ Core TypeScript is consumed as source (no build step): Vite and esbuild bundle i
 - `chrome://webrtc-internals` (browser) or `--remote-debugging-port=9222` (desktop: `npx electron apps/desktop --remote-debugging-port=9222`) give full WebRTC traces.
 - `/api/info` on the server reports whether TURN is configured.
 
+## Screenshots
+
+The images in `docs/images` (light and dark theme) are generated from the real desktop app and browser version. After UI changes, regenerate them on Linux:
+
+```bash
+npm run build
+dbus-run-session -- sh -c 'echo | gnome-keyring-daemon --unlock --components=secrets >/dev/null &&
+  xvfb-run -a -s "-screen 0 1280x820x24" npm run screenshots'
+```
+
+`gnome-keyring` and `xvfb` must be installed; the keyring lets the desktop app store its secrets as on a normal Linux desktop.
+
 ## Releasing
 
-1. Bump `version` in `apps/desktop/package.json` (and `APP_VERSION` in `packages/core/src/protocol.ts`).
+1. Bump the version everywhere: `npm version X.Y.Z --no-git-tag-version --workspaces --include-workspace-root`, and `APP_VERSION` in `packages/core/src/protocol.ts`.
 2. Update `CHANGELOG.md`.
 3. Actions tab → **Release desktop apps** → **Run workflow** on `main` with the version `vX.Y.Z` (or push the tag yourself: `git tag vX.Y.Z && git push origin vX.Y.Z`). GitHub Actions builds the Windows, macOS and Linux installers, creates the tag and the release with a `SHA256SUMS.txt`, and publishes the server image to GHCR.
