@@ -1,0 +1,22 @@
+{
+  "name": "@beamdesk/web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BeamDesk user interface - runs in the browser and inside the desktop app.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@beamdesk/core": "1.0.0",
+    "@preact/signals": "^2.3.1",
+    "lucide-preact": "^1.59.0",
+    "preact": "^10.27.2"
+  },
+  "devDependencies": {
+    "vite": "^7.1.12"
+  }
+}

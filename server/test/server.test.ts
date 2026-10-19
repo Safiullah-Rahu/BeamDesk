@@ -1,0 +1,162 @@
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig } from '../src/config.ts';
+import { createBeamServer, type BeamServer } from '../src/server.ts';
+import { Identity, registrationMessage } from '../../packages/core/src/identity.ts';
+import { SignalingClient, type IncomingSignal } from '../../packages/core/src/signaling.ts';
+
+let server: BeamServer;
+let url: string;
+let base: string;
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-test-'));
+
+before(async () => {
+  server = createBeamServer(
+    loadConfig({ PORT: '0', HOST: '127.0.0.1', DATA_DIR: dataDir, WEB_ROOT: '', TURN_URLS: 'turn:turn.example.com:3478', TURN_SECRET: 's3cret' }),
+  );
+  const port = await server.listen();
+  url = `ws://127.0.0.1:${port}/ws`;
+  base = `http://127.0.0.1:${port}`;
+});
+
+after(async () => {
+  await server.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+const client = (identity = Identity.generate(), extra: Partial<ConstructorParameters<typeof SignalingClient>[0]> = {}) =>
+  new SignalingClient({ url, identity, name: 'Test', platform: 'linux', ...extra });
+
+const next = <T>(c: SignalingClient, event: 'signal' | 'undeliverable' | 'state'): Promise<T> =>
+  new Promise((resolve) => {
+    const off = c.on(event as 'signal', (v) => {
+      off();
+      resolve(v as T);
+    });
+  });
+
+test('devices register and receive TURN credentials', async () => {
+  const a = client();
+  a.start();
+  await a.waitOnline();
+  const turn = a.ice.find((s) => String(s.urls).includes('turn:'));
+  assert.ok(turn?.username?.endsWith(`:${a.id}`), 'ephemeral username is bound to the device ID');
+  assert.ok(turn?.credential);
+  const fresh = await a.refreshIce();
+  assert.ok(fresh.length >= 2);
+  a.stop();
+});
+
+test('signals are relayed between online devices with a verified sender ID', async () => {
+  const a = client();
+  const b = client();
+  a.start();
+  b.start();
+  await Promise.all([a.waitOnline(), b.waitOnline()]);
+  const got = next<IncomingSignal>(b, 'signal');
+  assert.ok(a.send(b.id, 'sid-1', 'offer', { sdp: 'x' }));
+  const s = await got;
+  assert.equal(s.from, a.id);
+  assert.equal(s.sid, 'sid-1');
+  assert.equal(s.kind, 'offer');
+  assert.deepEqual(s.data, { sdp: 'x' });
+
+  const presence = await a.presence([b.id, '999999999']);
+  assert.deepEqual(presence, { [b.id]: true, '999999999': false });
+
+  const miss = next<{ reason: string }>(a, 'undeliverable');
+  a.send('999999999', 'sid-2', 'offer', {});
+  assert.equal((await miss).reason, 'offline');
+  a.stop();
+  b.stop();
+});
+
+test('a second connection with the same identity replaces the first', async () => {
+  const id = Identity.generate();
+  const first = client(id);
+  first.start();
+  await first.waitOnline();
+  const replaced = next<string>(first, 'state');
+  const second = client(id);
+  second.start();
+  await second.waitOnline();
+  assert.equal(await replaced, 'replaced');
+  second.stop();
+  first.stop();
+});
+
+async function rawRegister(pk: string, sign: (challenge: string) => string) {
+  const ws = new WebSocket(url);
+  const messages: any[] = [];
+  await new Promise<void>((resolve) => {
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data as string);
+      messages.push(m);
+      if (m.t === 'hello') ws.send(JSON.stringify({ t: 'register', pk, sig: sign(m.challenge), name: 'x', platform: 'web', version: '1' }));
+      else resolve();
+    };
+  });
+  ws.close();
+  return messages[1];
+}
+
+test('registration with a bad signature is rejected', async () => {
+  const id = Identity.generate();
+  const other = Identity.generate();
+  const res = await rawRegister(id.publicKeyB64, (c) => other.sign(registrationMessage(c)));
+  assert.equal(res.t, 'error');
+  assert.equal(res.code, 'bad-signature');
+});
+
+test('replayed signatures from another challenge are rejected', async () => {
+  const id = Identity.generate();
+  const res = await rawRegister(id.publicKeyB64, () => id.sign(registrationMessage('old-challenge')));
+  assert.equal(res.code, 'bad-signature');
+});
+
+test('connection requests are rate limited per device', async () => {
+  const a = client();
+  const b = client();
+  a.start();
+  b.start();
+  await Promise.all([a.waitOnline(), b.waitOnline()]);
+  let limited = false;
+  const off = a.on('undeliverable', (u) => {
+    if (u.reason === 'rate-limited') limited = true;
+  });
+  for (let i = 0; i < 25; i++) a.send(b.id, `s${i}`, 'offer', {});
+  await new Promise((r) => setTimeout(r, 300));
+  off();
+  assert.ok(limited);
+  a.stop();
+  b.stop();
+});
+
+test('http endpoints', async () => {
+  const health = await fetch(`${base}/healthz`).then((r) => r.json());
+  assert.equal(health.ok, true);
+  const info = await fetch(`${base}/api/info`).then((r) => r.json());
+  assert.equal(info.turn, true);
+  assert.equal(info.requiresKey, false);
+  const res = await fetch(`${base}/api/info`);
+  assert.equal(res.headers.get('x-frame-options'), 'DENY');
+});
+
+test('access key protects private servers', async () => {
+  const priv = createBeamServer(loadConfig({ PORT: '0', HOST: '127.0.0.1', DATA_DIR: dataDir, WEB_ROOT: '', ACCESS_KEY: 'team-key' }));
+  const port = await priv.listen();
+  const purl = `ws://127.0.0.1:${port}/ws`;
+  const bad = new SignalingClient({ url: purl, identity: Identity.generate(), name: 'x', platform: 'web', accessKey: 'nope' });
+  bad.start();
+  await assert.rejects(bad.waitOnline(3000));
+  assert.equal(bad.lastError?.code, 'access-key');
+  bad.stop();
+  const good = new SignalingClient({ url: purl, identity: Identity.generate(), name: 'x', platform: 'web', accessKey: 'team-key' });
+  good.start();
+  await good.waitOnline(3000);
+  good.stop();
+  await priv.close();
+});

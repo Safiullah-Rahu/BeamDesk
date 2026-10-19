@@ -1,0 +1,35 @@
+{
+  "name": "beamdesk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Open-source, end-to-end encrypted remote desktop. Desktop app + browser client + self-hostable server.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "server",
+    "apps/web",
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=20.18"
+  },
+  "scripts": {
+    "dev": "npm run build:web && npm run dev -w server",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:desktop": "npm run dev -w apps/desktop",
+    "build": "npm run build:web && npm run build -w server && npm run build -w apps/desktop",
+    "build:web": "npm run build -w apps/web",
+    "start": "npm run start -w server",
+    "dist:desktop": "npm run build:web && npm run dist -w apps/desktop",
+    "typecheck": "tsc -p packages/core && tsc -p server && tsc -p apps/web && tsc -p apps/desktop",
+    "test": "node --test --test-reporter=spec \"packages/core/test/*.test.ts\" \"server/test/*.test.ts\"",
+    "test:e2e": "npm run build:web && npm run build -w server && playwright test -c e2e/playwright.config.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@types/node": "^22.10.0",
+    "typescript": "5.9.3"
+  }
+}

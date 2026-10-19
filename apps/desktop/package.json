@@ -1,0 +1,30 @@
+{
+  "name": "beamdesk-desktop",
+  "productName": "BeamDesk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BeamDesk — free, open-source, end-to-end encrypted remote desktop.",
+  "license": "MIT",
+  "author": {
+    "name": "BeamDesk contributors",
+    "email": "safiullahrahu1555@gmail.com"
+  },
+  "homepage": "https://github.com/Safiullah-Rahu/BeamDesk",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs --dev && electron .",
+    "start": "electron .",
+    "dist": "node scripts/build.mjs && electron-builder --config electron-builder.yml",
+    "dist:dir": "node scripts/build.mjs && electron-builder --config electron-builder.yml --dir"
+  },
+  "dependencies": {
+    "@jitsi/robotjs": "0.6.24"
+  },
+  "devDependencies": {
+    "@beamdesk/core": "1.0.0",
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "^0.25.11"
+  }
+}

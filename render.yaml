@@ -1,0 +1,26 @@
+# One-click deploy on Render: https://render.com/deploy?repo=https://github.com/Safiullah-Rahu/BeamDesk
+services:
+  - type: web
+    name: beamdesk
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: TRUST_PROXY
+        value: "true"
+      - key: SERVER_NAME
+        value: BeamDesk
+      - key: ACCESS_KEY
+        sync: false
+      - key: TURN_URLS
+        sync: false
+      - key: TURN_USERNAME
+        sync: false
+      - key: TURN_PASSWORD
+        sync: false
+    disk:
+      name: beamdesk-data
+      mountPath: /data
+      sizeGB: 1
