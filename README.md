@@ -15,6 +15,7 @@ peer-to-peer, self-hostable, with a desktop app **and** a zero-install browser v
 [User guide](docs/USER_GUIDE.md) ·
 [Host your own server](docs/SELF_HOSTING.md) ·
 [Security](docs/SECURITY_MODEL.md) ·
+[Security audit](docs/SECURITY_AUDIT.md) ·
 [Architecture](docs/ARCHITECTURE.md)
 
 <img src="docs/images/home-light.png" alt="BeamDesk home screen" width="820" />
@@ -83,6 +84,8 @@ docker compose up -d        # BeamDesk + automatic HTTPS + TURN relay
 Open `https://your-domain` — that is the browser version, ready to use. Point the desktop apps at the same address (Settings → Network), or bake it into your own installers.
 Other options (Render, Fly.io, a plain Node.js process, private servers with an access key) are in [SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
+**Just want to try it with your phone?** Deploy the free Render test server with one click, or run the server on your computer and open it from your phone on the same Wi‑Fi — step by step in [Try it on your phone](docs/SELF_HOSTING.md#try-it-on-your-phone).
+
 ## How it works
 
 ```mermaid
@@ -99,7 +102,7 @@ flowchart LR
 4. The host asks its user to accept (unless a password / trusted device / help link already authorised it).
 5. Only then does the host reveal its network addresses; WebRTC connects directly (or via TURN) and the screen starts streaming.
 
-Details: [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [SECURITY_MODEL.md](docs/SECURITY_MODEL.md)
+Details: [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [SECURITY_MODEL.md](docs/SECURITY_MODEL.md) · [SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md)
 
 ## Repository layout
 

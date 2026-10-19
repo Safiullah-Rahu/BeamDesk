@@ -1,10 +1,14 @@
 # Builds installers for Windows, macOS and Linux and attaches them to a GitHub release.
 # Trigger: push a tag like v1.0.0  (git tag v1.0.0 && git push origin v1.0.0)
+# "Run workflow" on the Actions tab builds the installers without publishing (artifacts only).
 #
 # Optional repository settings (Settings -> Secrets and variables -> Actions):
 #   variable BEAMDESK_SERVER_URL   your server, baked into the apps so users never type it
 #   secrets  CSC_LINK / CSC_KEY_PASSWORD            code signing certificate (Windows/macOS)
 #   secrets  APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID   macOS notarization
+#
+# Security: the build jobs run third-party build tooling, so they only get a read-only token and
+# keep no git credentials. Only the small publish job can write, and it runs no project code.
 name: Release desktop apps
 
 on:
@@ -13,7 +17,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -29,6 +33,8 @@ jobs:
           - { name: Linux, os: ubuntu-latest, args: --linux }
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -40,17 +46,15 @@ jobs:
         run: |
           npm run build:web
           npm run build -w apps/desktop
-      - name: Package and publish
+      - name: Package
         working-directory: apps/desktop
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          PUBLISH: ${{ startsWith(github.ref, 'refs/tags/') && 'always' || 'never' }}
         run: |
           # Unset secrets that are not configured: electron-builder treats empty values as real ones.
           for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
@@ -60,9 +64,11 @@ jobs:
           if [ -z "${CSC_LINK:-}" ]; then
             export CSC_IDENTITY_AUTO_DISCOVERY=false
             # Without a certificate, ad-hoc sign macOS builds (Apple silicon refuses unsigned apps).
-            if [ "$RUNNER_OS" = "macOS" ]; then extra+=(-c.mac.identity=-); fi
+            # The hardened runtime needs a real signing identity (library validation), so it is
+            # only enabled for signed builds.
+            if [ "$RUNNER_OS" = "macOS" ]; then extra+=(-c.mac.identity=- -c.mac.hardenedRuntime=false); fi
           fi
-          npx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish "$PUBLISH" "${extra[@]}"
+          npx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish never "${extra[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: BeamDesk-${{ matrix.name }}
@@ -72,5 +78,33 @@ jobs:
             apps/desktop/release/*.zip
             apps/desktop/release/*.AppImage
             apps/desktop/release/*.deb
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
+
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * | tee SHA256SUMS.txt
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "BeamDesk $TAG" --generate-notes --verify-tag
+          fi

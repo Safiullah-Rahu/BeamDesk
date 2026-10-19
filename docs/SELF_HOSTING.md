@@ -16,6 +16,7 @@ When two networks are too strict for a direct connection (some corporate or mobi
 - [Option B — Render (one click)](#option-b--render)
 - [Option C — Fly.io](#option-c--flyio)
 - [Option D — plain Node.js](#option-d--plain-nodejs)
+- [Try it on your phone](#try-it-on-your-phone)
 - [Configuration reference](#configuration-reference)
 - [Point the apps at your server](#point-the-apps-at-your-server)
 - [Private servers](#private-servers)
@@ -52,7 +53,9 @@ The compose file runs three containers:
 
 - **beamdesk** — the server (pre-built image `ghcr.io/safiullah-rahu/beamdesk-server`, or built from source with `docker compose build`),
 - **caddy** — HTTPS with automatic certificates,
-- **coturn** — the TURN relay, with short-lived credentials derived from `TURN_SECRET` and private networks blocked (so the relay cannot be abused to reach your internal network).
+- **coturn** — the TURN relay, with short-lived credentials derived from `TURN_SECRET`. It only relays UDP to public addresses (no TCP relays; loopback, private, link-local, IPv4-mapped and NAT64 ranges blocked) so it cannot be abused to reach your internal network, caps each session's bandwidth, and keeps the secret in a private config file rather than on the command line.
+
+The server refuses to start if `TURN_SECRET` is missing, shorter than 16 characters or still the example placeholder.
 
 Update: `docker compose pull && docker compose up -d`.
 
@@ -66,7 +69,7 @@ Update: `docker compose pull && docker compose up -d`.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Safiullah-Rahu/BeamDesk)
 
-The included [`render.yaml`](../render.yaml) creates a Docker web service with a health check and a 1 GB disk for the device registry. Render provides HTTPS automatically; your server will be at `https://<name>.onrender.com`.
+The included [`render.yaml`](../render.yaml) creates a Docker web service with a health check on the **free plan** — perfect for trying BeamDesk. Render provides HTTPS automatically; your server will be at `https://<name>.onrender.com`. For real use switch to a paid instance and uncomment the disk in `render.yaml`, so the device registry (which protects IDs from being taken over) survives restarts.
 
 - Render does not offer UDP, so you cannot run TURN there. Most connections work directly; for strict networks add an external TURN service (see [TURN providers](#turn-without-running-coturn)).
 - The free plan sleeps when idle, which drops devices that are waiting for connections. Use a paid instance for always-on hosts.
@@ -113,6 +116,33 @@ location / {
 
 ---
 
+## Try it on your phone
+
+Two ways to test BeamDesk between your computer and your phone in a few minutes.
+
+**A. Free test server (works anywhere, with HTTPS).**
+
+1. Click **Deploy to Render** above, sign in, keep the free plan and click **Deploy**. The first build takes about 5 minutes.
+2. On your computer, open `https://<name>.onrender.com` in Chrome or Edge and click **Let someone view this screen** (pick the screen to share). Note the **ID** and the **one-time password**.
+3. On your phone, open the same address, type the ID, tap **I have a password**, enter the password and tap **Connect** — or leave the password out and click **Accept** on the computer.
+
+For full remote control, install the desktop app on the computer and set the same address in **Settings → Network**.
+
+**B. Same Wi‑Fi, nothing to deploy.** On the computer (Node.js 20+):
+
+```bash
+git clone https://github.com/Safiullah-Rahu/BeamDesk.git && cd BeamDesk
+npm ci && npm run build:web && npm run build -w server
+node server/dist/server.mjs        # prints: on your network: http://192.168.x.y:8080
+```
+
+1. On the computer open `http://localhost:8080` (allow Node.js through the firewall if asked) and click **Let someone view this screen**.
+2. On the phone (same Wi‑Fi) open the `http://192.168.x.y:8080` address the server printed, and connect with the ID as above.
+
+Plain `http://` pages are fine for watching and controlling from a phone, but browsers disable some features there (clipboard sync, notifications, and screen sharing *from* that page). Use option A or your own HTTPS server for everything else.
+
+---
+
 ## Configuration reference
 
 All settings are environment variables.
@@ -125,16 +155,18 @@ All settings are environment variables.
 | `DATA_DIR` | `./data` | Where the device registry (`devices.json`) is stored |
 | `WEB_ROOT` | auto | Folder with the built web app; empty string disables it |
 | `ACCESS_KEY` | — | If set, apps must enter this key to use the server ([private servers](#private-servers)) |
-| `TRUST_PROXY` | `false` | Use the last `X-Forwarded-For` entry (added by your reverse proxy) as the client IP — set `true` behind exactly one proxy |
+| `TRUST_PROXY` | `false` | Behind a reverse proxy: `true` (one proxy) or the number of proxies in front of the server. The client IP is taken that many entries from the right of `X-Forwarded-For`. Only enable it if nothing but your proxy can reach the server |
 | `STUN_URLS` | Google + Cloudflare STUN | Comma-separated STUN URLs |
 | `TURN_URLS` | — | Comma-separated TURN URLs, e.g. `turn:desk.example.com:3478?transport=udp,turn:desk.example.com:3478?transport=tcp` |
-| `TURN_SECRET` | — | coturn `static-auth-secret`: the server issues time-limited credentials (recommended) |
+| `TURN_SECRET` | — | coturn `static-auth-secret`: the server issues time-limited credentials (recommended). At least 16 random characters |
 | `TURN_USERNAME` / `TURN_PASSWORD` | — | Static TURN credentials instead of `TURN_SECRET` |
-| `TURN_TTL` | `43200` | Lifetime of issued TURN credentials, in seconds |
+| `TURN_TTL` | `3600` | Lifetime of issued TURN credentials, in seconds (max. 86400); apps refresh them for every session |
 | `ICE_SERVERS_JSON` | — | Full override: a JSON array of `RTCIceServer` objects |
 | `MAX_CLIENTS` | `20000` | Maximum simultaneous devices |
 | `MAX_CONNECTIONS_PER_IP` | `50` | Connections allowed from one IP address |
-| `NEW_DEVICES_PER_HOUR` | `60` | New device IDs one IP address may register per hour (bursts up to twice that); `0` = unlimited |
+| `NEW_DEVICES_PER_HOUR` | `60` | New device IDs one network (IPv4 address or IPv6 /64) may register per hour (bursts up to twice that); `0` = unlimited |
+| `NEW_DEVICES_GLOBAL_PER_HOUR` | `10000` | New device IDs the whole server accepts per hour; `0` = unlimited |
+| `MAX_DEVICES` | `1000000` | Maximum remembered device IDs; new devices are refused beyond it (IDs unused for a year are forgotten) |
 | `DOWNLOAD_URL` | GitHub releases | Where "Install the desktop app" links point |
 
 Endpoints: `/` web app · `/ws` WebSocket · `/healthz` health check · `/api/info` server name, version, TURN availability.

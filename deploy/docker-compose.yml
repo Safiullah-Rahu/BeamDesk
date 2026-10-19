@@ -1,6 +1,6 @@
 # Production deployment: BeamDesk server + automatic HTTPS (Caddy) + TURN relay (coturn).
 #
-#   cp .env.example .env     # set DOMAIN and TURN_SECRET
+#   cp .env.example .env     # set DOMAIN, and TURN_SECRET=$(openssl rand -hex 32)
 #   docker compose up -d
 #
 # Open ports: 80/tcp, 443/tcp (HTTPS), 3478/tcp+udp (TURN), 49160-49200/udp (TURN relay).
@@ -50,19 +50,34 @@ services:
       DOMAIN: ${DOMAIN}
       TURN_SECRET: ${TURN_SECRET}
       TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+    # The secret goes into a private config file, not the command line (visible to every
+    # process on the host). The relay only forwards UDP to public addresses: no TCP relays,
+    # no loopback/private/link-local/mapped ranges, so it cannot be used to reach your network.
     entrypoint: ["sh", "-c"]
     command:
-      - >-
-        exec turnserver -n --log-file=stdout --no-cli --fingerprint
-        --use-auth-secret --static-auth-secret="$$TURN_SECRET" --realm="$$DOMAIN"
-        --listening-port=3478 --min-port=49160 --max-port=49200
-        --external-ip="$${TURN_EXTERNAL_IP:-$$(detect-external-ip)}"
-        --no-multicast-peers --no-tlsv1 --no-tlsv1_1 --stale-nonce=600
-        --user-quota=12 --total-quota=1200
-        --denied-peer-ip=0.0.0.0-0.255.255.255 --denied-peer-ip=10.0.0.0-10.255.255.255
-        --denied-peer-ip=100.64.0.0-100.127.255.255 --denied-peer-ip=127.0.0.0-127.255.255.255
-        --denied-peer-ip=169.254.0.0-169.254.255.255 --denied-peer-ip=172.16.0.0-172.31.255.255
-        --denied-peer-ip=192.168.0.0-192.168.255.255 --denied-peer-ip=::1 --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - |
+        set -e
+        umask 077
+        conf=/tmp/turnserver.conf
+        {
+          echo "static-auth-secret=$$TURN_SECRET"
+          echo "realm=$$DOMAIN"
+          echo "external-ip=$${TURN_EXTERNAL_IP:-$$(detect-external-ip)}"
+        } > "$$conf"
+        exec turnserver -c "$$conf" -n --log-file=stdout --no-cli --fingerprint --use-auth-secret \
+          --listening-port=3478 --min-port=49160 --max-port=49200 \
+          --no-tcp-relay --no-multicast-peers --no-tlsv1 --no-tlsv1_1 --no-software-attribute \
+          --stale-nonce=600 --user-quota=12 --total-quota=1200 --max-bps=1500000 \
+          --denied-peer-ip=0.0.0.0-0.255.255.255 --denied-peer-ip=10.0.0.0-10.255.255.255 \
+          --denied-peer-ip=100.64.0.0-100.127.255.255 --denied-peer-ip=127.0.0.0-127.255.255.255 \
+          --denied-peer-ip=169.254.0.0-169.254.255.255 --denied-peer-ip=172.16.0.0-172.31.255.255 \
+          --denied-peer-ip=192.0.0.0-192.0.0.255 --denied-peer-ip=192.168.0.0-192.168.255.255 \
+          --denied-peer-ip=198.18.0.0-198.19.255.255 --denied-peer-ip=224.0.0.0-255.255.255.255 \
+          --denied-peer-ip=:: --denied-peer-ip=::1 \
+          --denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255 \
+          --denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff \
+          --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff \
+          --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
 
 volumes:
   beamdesk-data:

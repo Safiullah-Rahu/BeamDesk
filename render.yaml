@@ -1,10 +1,14 @@
 # One-click deploy on Render: https://render.com/deploy?repo=https://github.com/Safiullah-Rahu/BeamDesk
+#
+# The free plan is enough to try BeamDesk (it sleeps after 15 minutes without traffic, and the
+# device registry starts empty after each restart). For real use pick "starter" and uncomment
+# the disk, so device IDs stay protected across restarts.
 services:
   - type: web
     name: beamdesk
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: starter
+    plan: free
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
@@ -16,11 +20,13 @@ services:
         sync: false
       - key: TURN_URLS
         sync: false
+      - key: TURN_SECRET
+        sync: false
       - key: TURN_USERNAME
         sync: false
       - key: TURN_PASSWORD
         sync: false
-    disk:
-      name: beamdesk-data
-      mountPath: /data
-      sizeGB: 1
+    # disk:
+    #   name: beamdesk-data
+    #   mountPath: /data
+    #   sizeGB: 1

@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,8 +36,8 @@ jobs:
           npm run build -w server
           npm run build -w apps/desktop
       - run: npx playwright install chromium
-      - name: End-to-end tests (browser to browser)
-        run: npx playwright test -c e2e/playwright.config.ts web.spec.ts
+      - name: End-to-end tests (browser to browser, and attacks through a tampering relay)
+        run: npx playwright test -c e2e/playwright.config.ts web.spec.ts security.spec.ts
       - name: End-to-end test (desktop app as host)
         env:
           BEAMDESK_E2E_DESKTOP: '1'

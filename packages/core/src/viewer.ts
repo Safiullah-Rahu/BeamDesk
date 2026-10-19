@@ -133,6 +133,8 @@ export class ViewerSession extends Emitter<Events> {
   private accepted = false;
   /** The user gave a password and the host's key is not otherwise known: the host must prove it knows it. */
   private needsPasswordProof = false;
+  /** Control messages that arrived before the acceptance was verified (replayed after it). */
+  private early: unknown[] = [];
   private pendingIce: RTCIceCandidateInit[] = [];
   /** Our own candidates, held back until the host has proven its identity (they reveal our IP). */
   private localIce: RTCIceCandidateInit[] | null = [];
@@ -489,6 +491,7 @@ export class ViewerSession extends Emitter<Events> {
     this.perms = perms;
     this.emit('perms', this.perms);
     this.setState(this.channels?.control.readyState === 'open' ? 'connected' : 'starting');
+    for (const raw of this.early.splice(0)) this.onControl(raw);
     // If the transport has not come up quickly (e.g. a stale candidate pair), renegotiate ICE.
     this.after(8_000, () => {
       if (this.state === 'starting') void this.restartIce();
@@ -499,7 +502,12 @@ export class ViewerSession extends Emitter<Events> {
   }
 
   private onControl(raw: unknown): void {
-    if (!this.accepted) return;
+    if (!this.accepted) {
+      // On a fast network the channel can open before the signed acceptance has arrived
+      // through the server: keep the first few messages until then, act on none of them.
+      if (this.early.length < 32) this.early.push(raw);
+      return;
+    }
     const m = parseControlMessage(raw);
     if (!m) return;
     switch (m.t) {

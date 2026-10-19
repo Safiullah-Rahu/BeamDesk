@@ -119,3 +119,15 @@ test('acceptance signatures bind session, channel, viewer, slot and permissions'
     assert.ok(!verifySignature(host.publicKeyB64, utf8(tampered), sig));
   }
 });
+
+test('permanent password secrets are identical with and without WebCrypto', async () => {
+  const withSubtle = await derivePasswordSecret('perm', 'correct horse battery', '123456789');
+  const original = globalThis.crypto;
+  Object.defineProperty(globalThis, 'crypto', { value: { getRandomValues: original.getRandomValues.bind(original) }, configurable: true });
+  try {
+    const pure = await derivePasswordSecret('perm', 'correct horse battery', '123456789');
+    assert.deepEqual(pure, withSubtle);
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', { value: original, configurable: true });
+  }
+});

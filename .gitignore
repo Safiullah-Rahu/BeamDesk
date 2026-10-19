@@ -13,4 +13,5 @@ test-results/
 playwright-report/
 apps/desktop/web/
 server/data/
+/data/
 *.tsbuildinfo

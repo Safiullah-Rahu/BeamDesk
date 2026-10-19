@@ -29,7 +29,7 @@ To report a vulnerability, see [SECURITY.md](../SECURITY.md).
 
 ### Password derivation
 
-- One-time password (default 6 characters from a 31-character alphabet without look-alikes, ≈ 2³⁰): `PRS = SHA-256(lv("BeamDesk-PRS-otp-v1", hostID, normalised password))`. Rotated after every session it was used for (configurable).
+- One-time password (default 6 characters from a 31-character alphabet without look-alikes, ≈ 2³⁰): `PRS = SHA-256(lv("BeamDesk-PRS-otp-v1", hostID, normalised password))`. Spent as soon as it lets someone in: a new one is generated when the session starts (configurable), and it is hidden while a session is active.
 - Permanent password: `PRS = PBKDF2-SHA256(password, "BeamDesk-PRS-perm-v1|" + hostID, 210 000 iterations)`. The host stores only the PRS (encrypted with the OS keychain), never the password.
 
 ### CPace instance
@@ -51,9 +51,9 @@ sequenceDiagram
   participant H as Host
   V->>S: offer (SDP, no candidates yet)
   S->>H: offer
-  H->>S: answer + hello {pk_H, sig_H(sid,CI,ID_V), CPace shares per slot}
+  H->>S: answer + hello {pk_H, CPace shares per slot, sig_H(sid,CI,ID_V,shares,canAsk)}
   S->>V: answer + hello
-  Note over V: verify pk_H → ID_H, sig_H, pinned key
+  Note over V: verify pk_H → ID_H, sig_H, pinned key — only then send own ICE candidates
   V->>S: auth {pk_V, sig_V(sid,CI,ID_H), CPace shares, tags}
   S->>H: auth
   Note over H: verify pk_V → ID_V, sig_V, password tag
@@ -70,13 +70,23 @@ sequenceDiagram
 
 The TURN relay (if used) sees encrypted packets and the two endpoints' addresses.
 
+The signature covers the password offer, so a relay cannot remove it to turn a password login
+into a plain accept prompt. A viewer that gave a password for a device whose key it has not
+verified before (no pin, no link) also requires the host's confirmation tag; without it the
+connection stops. Once the data channels are open, only messages on them can end a session —
+signaling `bye`/`pending` injected by the server are ignored.
+
 ## Hardening in the apps
 
 - Electron: `contextIsolation`, `sandbox`, no Node.js in the page, a minimal preload bridge, IPC accepted only from the app's own origin, navigation and new windows blocked, permissions granted only to the app origin, strict Content Security Policy.
-- All data-channel messages are schema-validated; key names injected on the host are allow-listed; file names are sanitised (no paths, no reserved names) and written as `.part` until complete; received sizes are bounded by the announced size.
+- All data-channel messages are schema-validated and normalised (clamped quality values, boolean-only permissions); key names injected on the host are allow-listed (own properties only).
+- Files: nothing is streamed before the receiver accepts. Viewers confirm every file; hosts confirm programs, scripts, installers and shortcuts, which are flagged. At most four incoming files at once. Names are sanitised (no paths, reserved names, bidi tricks or whitespace padding), written as `.part` until complete, bounded by the announced size, and marked as downloaded from the internet (Windows `Zone.Identifier`, macOS quarantine). Shortcut/link files are refused on the desktop.
+- One-time passwords are spent when they let someone in and are hidden while a session is active. Wrong passwords lock out the guessing device (5 per 10 minutes); a global budget stops distributed guessing without locking out trusted devices. Each device may trigger at most three accept prompts per 10 minutes.
+- Help links contain a random token: only invites that echo it are shown, so nobody can pose as "support" by sending invites to an ID.
+- Electron fuses disable running the app as Node.js, `NODE_OPTIONS` and inspector flags, and enforce asar integrity; the main process injects input only while a session with control permission is active, and the download folder can only be set through the folder picker.
 - Device names are stripped of control and bidirectional-override characters to prevent spoofed prompts.
 - Dialogs never auto-focus a button, so a stray Enter cannot accept an incoming connection.
-- On the desktop, the viewer keeps the clipboard in sync only while its window is focused.
+- The viewer sends its clipboard only while its window is focused, and applies the remote clipboard only while the user looks at that session. Notices from the other device are labelled with its name; unknown close reasons are never shown verbatim.
 - If a server already knows a device's ID with a different key, the app generates a new identity instead of failing.
 - A visible "someone is connected" bar (excluded from screen capture on Windows/macOS) and tray status show active sessions; ending is always one click away.
 - Secrets in the browser version live in `localStorage` of your BeamDesk origin, protected by a strict CSP.

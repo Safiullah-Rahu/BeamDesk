@@ -379,21 +379,22 @@ function json(res: http.ServerResponse, headers: Record<string, string>, status:
 }
 
 /** True when the browser reached us over HTTPS (directly or through a trusted proxy). */
-function isSecure(req: http.IncomingMessage, trustProxy: boolean): boolean {
+function isSecure(req: http.IncomingMessage, trustProxy: number): boolean {
   if ((req.socket as { encrypted?: boolean }).encrypted) return true;
   if (!trustProxy) return false;
   const proto = req.headers['x-forwarded-proto'];
   return (Array.isArray(proto) ? proto[0] : proto)?.split(',')[0]?.trim() === 'https';
 }
 
-function clientIp(req: http.IncomingMessage, trustProxy: boolean): string {
-  if (trustProxy) {
-    // Use the right-most entry: the one appended by our (trusted) reverse proxy.
-    // Entries further left come from the client and can be forged.
+function clientIp(req: http.IncomingMessage, trustProxy: number): string {
+  if (trustProxy > 0) {
+    // Each trusted proxy appends the address it received the request from. Count `trustProxy`
+    // entries from the right; anything further left came from the client and can be forged.
     const fwd = req.headers['x-forwarded-for'];
     const raw = Array.isArray(fwd) ? fwd.join(',') : fwd;
-    const last = raw?.split(',').map((s) => s.trim()).filter(Boolean).pop();
-    if (last) return last;
+    const list = raw?.split(',').map((s) => s.trim()).filter(Boolean) ?? [];
+    const ip = list[list.length - trustProxy] ?? list[0];
+    if (ip) return ip.slice(0, 64);
   }
   return req.socket.remoteAddress ?? 'unknown';
 }

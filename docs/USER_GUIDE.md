@@ -59,9 +59,9 @@ The pill in the corner tells you whether BeamDesk is **Ready**. If it says *Offl
    - Untick *Control mouse & keyboard* if you only want them to watch.
 4. A red bar at the top of your screen shows that someone is connected. Click **Disconnect** on it at any time.
 
-**Even faster:** click **Copy invite link** and send it by WhatsApp, e-mail or SMS. Your helper opens it, clicks **Connect**, and is in — the link contains your one-time password (which changes after every session) and your device's security key, so it can only reach *your* computer.
+**Even faster:** click **Copy invite link** and send it by WhatsApp, e-mail or SMS. Your helper opens it, clicks **Connect**, and is in — the link contains your one-time password (which works once) and your device's security key, so it can only reach *your* computer.
 
-**Prefer not to click Accept?** Read out the **one-time password** too. When your helper enters it, they connect without the prompt. A new password is created after every session, so it can't be reused.
+**Prefer not to click Accept?** Read out the **one-time password** too. When your helper enters it, they connect without the prompt. Each password works **once**: as soon as it has let someone in, a new one is made (and it stays hidden while someone is connected).
 
 ---
 
@@ -115,7 +115,7 @@ The toolbar at the top of a session (hover over a button to see its name):
 
 **If you are the one being helped**, the *Someone is connected* card on your home screen lets you switch off **Control**, **Clipboard**, **Files** or **Sound** at any time, chat, send files, or **End** the session.
 
-Files you receive are saved in **Downloads/BeamDesk** (change this in Settings → General).
+Files you receive are saved in **Downloads/BeamDesk** (change this in Settings → General). BeamDesk asks before saving a file the other side sends you — always when you are the helper, and for programs, scripts and installers when you are being helped. Only click **Save file** if you expected it.
 
 ---
 
@@ -153,6 +153,8 @@ Open your BeamDesk server's address in the phone's browser and connect as usual.
 - **You are always in control.** End a session with the red bar's **Disconnect** button, the **End** button on the home screen, or by closing BeamDesk.
 - **Permissions per session.** Untick *Control*, *Clipboard* or *Files* in the accept window if the helper only needs to look.
 - **Block pests.** *Block this device* in the accept window stops that ID from asking again (undo in Settings → Security).
+- **Files are never saved without asking.** A warning appears for files that can run programs (`.exe`, `.msi`, `.dmg`, scripts…). Never open one you did not ask for.
+- **Messages from the other device are labelled** "‹name› says: …". BeamDesk itself never asks you to call a phone number or pay anyone.
 - **Lock it down.** Settings → Security → *Who can connect*: **Password only** or **Nobody**.
 
 ---

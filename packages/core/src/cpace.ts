@@ -19,6 +19,7 @@
  */
 import { ristretto255, ristretto255_hasher } from '@noble/curves/ed25519.js';
 import { hmac } from '@noble/hashes/hmac.js';
+import { pbkdf2Async } from '@noble/hashes/pbkdf2.js';
 import { sha256, sha512 } from '@noble/hashes/sha2.js';
 import { equalBytes, lvConcat, randomBytes, utf8 } from './util.ts';
 
@@ -43,18 +44,21 @@ export function normalizePermanentPassword(pw: string): string {
  * Password-related string (PRS). The host stores only this value, never the plain password.
  * Permanent passwords are stretched with PBKDF2 so a stolen settings file is costly to crack.
  */
+const PBKDF2_ITERATIONS = 210_000;
+
 export async function derivePasswordSecret(slot: PasswordSlot, password: string, hostId: string): Promise<Uint8Array> {
   if (slot === 'otp') {
     return sha256(lvConcat('BeamDesk-PRS-otp-v1', hostId, normalizeOneTimePassword(password)));
   }
+  const pw = utf8(normalizePermanentPassword(password));
+  const salt = utf8(`BeamDesk-PRS-perm-v1|${hostId}`);
   const subtle = globalThis.crypto?.subtle;
-  if (!subtle) throw new Error('WebCrypto is unavailable (BeamDesk must run in a secure context)');
-  const key = await subtle.importKey('raw', utf8(normalizePermanentPassword(password)) as BufferSource, 'PBKDF2', false, ['deriveBits']);
-  const bits = await subtle.deriveBits(
-    { name: 'PBKDF2', hash: 'SHA-256', salt: utf8(`BeamDesk-PRS-perm-v1|${hostId}`) as BufferSource, iterations: 210_000 },
-    key,
-    256,
-  );
+  if (!subtle) {
+    // Pages served over plain HTTP (e.g. testing on a local network) have no WebCrypto.
+    return pbkdf2Async(sha256, pw, salt, { c: PBKDF2_ITERATIONS, dkLen: 32, asyncTick: 25 });
+  }
+  const key = await subtle.importKey('raw', pw as BufferSource, 'PBKDF2', false, ['deriveBits']);
+  const bits = await subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS }, key, 256);
   return new Uint8Array(bits);
 }
 

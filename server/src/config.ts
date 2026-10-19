@@ -25,7 +25,8 @@ export interface Config {
   newDevicesGlobalPerHour: number;
   /** Upper bound on remembered device IDs; new IDs are refused once it is reached. */
   maxDevices: number;
-  trustProxy: boolean;
+  /** Reverse proxies in front of the server (0 = none): the client IP is that many entries from the right of X-Forwarded-For. */
+  trustProxy: number;
   downloadUrl: string;
 }
 
@@ -68,7 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     newDevicesPerHour: env.NEW_DEVICES_PER_HOUR === '0' ? 0 : int(env.NEW_DEVICES_PER_HOUR, 60),
     newDevicesGlobalPerHour: env.NEW_DEVICES_GLOBAL_PER_HOUR === '0' ? 0 : int(env.NEW_DEVICES_GLOBAL_PER_HOUR, 10_000),
     maxDevices: int(env.MAX_DEVICES, 1_000_000),
-    trustProxy: /^(1|true|yes)$/i.test(env.TRUST_PROXY || ''),
+    trustProxy: /^(true|yes)$/i.test(env.TRUST_PROXY || '') ? 1 : /^[0-5]$/.test(env.TRUST_PROXY || '') ? Number(env.TRUST_PROXY) : 0,
     downloadUrl: env.DOWNLOAD_URL || 'https://github.com/Safiullah-Rahu/BeamDesk/releases/latest',
   };
 }

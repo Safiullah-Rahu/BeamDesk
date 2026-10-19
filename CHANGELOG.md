@@ -2,9 +2,18 @@
 
 ## 1.0.0 — first release
 
+Security audit before release — 32 issues fixed, see [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md). Highlights:
+
+- Fixed a pre-authentication crash of the server (deeply nested JSON) and added protection against slow requests, floods and resource exhaustion.
+- Protocol v2: the host signs its password offer (no downgrade), viewers require password proof on first contact, sessions cannot be ended or stalled by the server, viewers reveal their IP only to a verified host.
+- Files need the receiver's consent before any data is sent; risky types are flagged, shortcut files refused, received files marked as downloaded from the internet.
+- Help-link invites carry a token (no fake "support" invites); one-time passwords are spent on use and hidden during sessions; per-device password lockout.
+- Desktop: Electron fuses, CSP for the app UI, exact origin checks, input only during sessions that allow control, minimal macOS entitlements.
+- Release builds run without write access; checksums are published with each release; Dependabot enabled. TURN relay restricted to UDP to public addresses.
+
 - Desktop app for Windows, macOS and Linux (Electron) and a browser version served by the server.
 - 9-digit IDs derived from per-device Ed25519 keys; signed server registration.
-- Accept prompt with per-session permissions, one-time passwords (rotate after each session), unattended access with a permanent password, trusted devices, block list.
+- Accept prompt with per-session permissions, one-time passwords (each works once), unattended access with a permanent password, trusted devices, block list.
 - CPace password authentication and identity signatures bound to the DTLS fingerprints; host IP hidden until acceptance (inlined SDP candidates included); key pinning on the viewer.
 - Signed acceptances, DTLS certificate pinning across ICE restarts, key-bound invite/help links with a confirmation step, per-IP limits on new device registrations, bounded pending requests.
 - Remote control: mouse, scroll, keyboard (layout-independent text mode and physical mode), special key combinations, Cmd ↔ Ctrl translation, touch gestures and on-screen keyboard on phones.
