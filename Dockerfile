@@ -2,7 +2,7 @@
 #   docker build -t beamdesk-server .
 #   docker run -p 8080:8080 -v beamdesk-data:/data beamdesk-server
 
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
@@ -18,7 +18,7 @@ COPY apps/web apps/web
 ARG BEAMDESK_SERVER_URL=""
 RUN npm run build -w apps/web && npm run build -w server
 
-FROM node:22-alpine
+FROM node:26-alpine
 LABEL org.opencontainers.image.title="BeamDesk server" \
       org.opencontainers.image.description="Signaling server and web app for BeamDesk, the open-source remote desktop" \
       org.opencontainers.image.source="https://github.com/Safiullah-Rahu/BeamDesk" \
