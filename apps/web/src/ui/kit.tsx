@@ -95,8 +95,9 @@ export function Modal({ title, onClose, children, footer, wide, labelledBy }: { 
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
-    const first = ref.current?.querySelector<HTMLElement>('[autofocus], input, button.btn-primary, button');
-    first?.focus();
+    // Never auto-focus a button: a stray Enter must not accept an incoming connection.
+    const target = ref.current?.querySelector<HTMLElement>('[autofocus], input:not([type=checkbox]):not([type=radio]), textarea') ?? ref.current;
+    target?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && onClose) {
         e.stopPropagation();
@@ -111,7 +112,7 @@ export function Modal({ title, onClose, children, footer, wide, labelledBy }: { 
   }, []);
   return (
     <div class="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}>
-      <div class={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy ?? 'modal-title'} ref={ref}>
+      <div class={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy ?? 'modal-title'} ref={ref} tabIndex={-1}>
         <div class="modal-head">
           <h2 id={labelledBy ?? 'modal-title'}>{title}</h2>
           {onClose && (

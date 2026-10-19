@@ -56,6 +56,10 @@ The compose file runs three containers:
 
 Update: `docker compose pull && docker compose up -d`.
 
+> The pre-built image is published to GitHub Container Registry by the *Server image* workflow. If it cannot be pulled
+> (for example while the package is still private — make it public under GitHub → Packages → `beamdesk-server` →
+> Package settings), Compose builds it from source instead. You can force that with `docker compose up -d --build`.
+
 ---
 
 ## Option B — Render

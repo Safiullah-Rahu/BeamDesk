@@ -42,15 +42,27 @@ jobs:
           npm run build -w apps/desktop
       - name: Package and publish
         working-directory: apps/desktop
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish ${{ startsWith(github.ref, 'refs/tags/') && 'always' || 'never' }}
+          PUBLISH: ${{ startsWith(github.ref, 'refs/tags/') && 'always' || 'never' }}
+        run: |
+          # Unset secrets that are not configured: electron-builder treats empty values as real ones.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          extra=()
+          if [ -z "${CSC_LINK:-}" ]; then
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+            # Without a certificate, ad-hoc sign macOS builds (Apple silicon refuses unsigned apps).
+            if [ "$RUNNER_OS" = "macOS" ]; then extra+=(-c.mac.identity=-); fi
+          fi
+          npx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish "$PUBLISH" "${extra[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: BeamDesk-${{ matrix.name }}
