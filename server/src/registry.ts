@@ -25,6 +25,7 @@ export class DeviceRegistry {
       this.timer = setInterval(() => this.flush(), 15_000);
       this.timer.unref();
     }
+    this.prune();
   }
 
   /** Returns false when the ID is already bound to a different key. */
@@ -39,7 +40,19 @@ export class DeviceRegistry {
   }
 
   has(id: string): boolean {
-    return this.entries.has(id);
+    const e = this.entries.get(id);
+    return !!e && Date.now() - e.seen < RETENTION_MS;
+  }
+
+  /** Forgets IDs that have not been seen for a year, so they can be claimed again. */
+  prune(): void {
+    const now = Date.now();
+    for (const [id, e] of this.entries) {
+      if (now - e.seen >= RETENTION_MS) {
+        this.entries.delete(id);
+        this.dirty = true;
+      }
+    }
   }
 
   get size(): number {
@@ -73,7 +86,7 @@ export class DeviceRegistry {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, Entry>;
       for (const [id, e] of Object.entries(raw)) {
-        if (/^\d{9}$/.test(id) && typeof e?.pk === 'string' && typeof e.seen === 'number') this.entries.set(id, e);
+        if (/^\d{9}$/.test(id) && typeof e?.pk === 'string' && e.pk.length <= 256 && Number.isFinite(e.seen)) this.entries.set(id, { pk: e.pk, seen: e.seen });
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') console.error('[registry] could not read devices.json:', (err as Error).message);

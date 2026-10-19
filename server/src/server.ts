@@ -17,9 +17,14 @@ import { fromBase64Url } from '@beamdesk/core/util';
 import type { Config } from './config.ts';
 import { DeviceRegistry } from './registry.ts';
 import { hasTurn, iceServersFor } from './ice.ts';
-import { SECURITY_HEADERS, StaticSite } from './static.ts';
+import { securityHeaders, StaticSite } from './static.ts';
 
 const SIGNAL_KINDS = new Set<SignalKind>(['offer', 'answer', 'ice', 'auth', 'pending', 'auth-result', 'bye', 'invite']);
+/** Deeper JSON than this is never legitimate and can blow the stack in Number()/String()/stringify. */
+const MAX_JSON_DEPTH = 16;
+/** Outgoing bytes queued for one client before we stop sending to it (slow or malicious reader). */
+const MAX_BUFFERED = 1024 * 1024;
+const SIGNAL_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 class TokenBucket {
   private tokens: number;
@@ -44,15 +49,51 @@ class TokenBucket {
 
 interface Client {
   ws: WebSocket;
+  /** Rate-limit key: IPv4 address or IPv6 /64 network. */
   ip: string;
   challenge: string;
   id: string | null;
   name: string;
   alive: boolean;
+  /** Set once the connection is being torn down; further messages are ignored. */
+  closing: boolean;
+  registerAttempted: boolean;
   messages: TokenBucket;
-  /** Connection requests and invites are rate limited separately (anti-spam). */
+  bytes: TokenBucket;
+  /** Connection requests, invites and "is this ID online?" probes are rate limited separately. */
   requests: TokenBucket;
+  presence: TokenBucket;
   registerTimer: ReturnType<typeof setTimeout> | null;
+}
+
+/** Returns false if the JSON text nests deeper than `max` (strings are skipped). */
+export function jsonDepthOk(text: string, max = MAX_JSON_DEPTH): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 92 /* \\ */) i++;
+      else if (c === 34 /* " */) inString = false;
+    } else if (c === 34) inString = true;
+    else if (c === 91 || c === 123 /* [ { */) {
+      if (++depth > max) return false;
+    } else if (c === 93 || c === 125) depth--;
+  }
+  return true;
+}
+
+/** Groups IPv6 clients by /64 (one customer network) and unwraps IPv4-mapped addresses. */
+export function rateLimitKey(ip: string): string {
+  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (v4) return v4[1];
+  if (!ip.includes(':')) return ip;
+  const [head] = ip.split('%');
+  const parts = head.split('::');
+  const left = parts[0] ? parts[0].split(':') : [];
+  const right = parts.length > 1 && parts[1] ? parts[1].split(':') : [];
+  const full = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill('0'), ...right];
+  return `${full.slice(0, 4).map((h) => h.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
 export interface BeamServer {
@@ -67,29 +108,42 @@ export function createBeamServer(config: Config): BeamServer {
   const registry = new DeviceRegistry(config.dataDir);
   const online = new Map<string, Client>();
   const perIp = new Map<string, number>();
-  /** New IDs per IP address: stops one network from squatting IDs or bloating the registry. */
+  /** New IDs per network: stops one network from squatting IDs or bloating the registry. */
   const newIdsPerIp = new Map<string, { bucket: TokenBucket; seen: number }>();
+  /** New WebSocket connections per network (each one costs a signature verification). */
+  const connectionsPerIp = new Map<string, { bucket: TokenBucket; seen: number }>();
+  const newIdsGlobal = new TokenBucket(config.newDevicesGlobalPerHour / 3600, Math.max(1, config.newDevicesGlobalPerHour / 4));
+  const bucketFor = (map: Map<string, { bucket: TokenBucket; seen: number }>, key: string, rate: number, burst: number) => {
+    let e = map.get(key);
+    if (!e) {
+      e = { bucket: new TokenBucket(rate, burst), seen: 0 };
+      map.set(key, e);
+    }
+    e.seen = Date.now();
+    return e.bucket;
+  };
   const turn = hasTurn(config);
   const serverInfo = { name: config.serverName, version: APP_VERSION, requiresKey: !!config.accessKey, turn };
 
-  const server = http.createServer((req, res) => {
+  // Timeouts must be constructor options: assigned later as properties, Node ignores them,
+  // which leaves the server open to slowloris (half-sent headers held forever).
+  const server = http.createServer({ headersTimeout: 15_000, requestTimeout: 30_000, connectionsCheckingInterval: 5_000, keepAliveTimeout: 5_000 }, (req, res) => {
     const url = req.url ?? '/';
+    const headers = securityHeaders(isSecure(req, config.trustProxy));
     if (url === '/healthz' || url === '/api/health') {
-      return json(res, 200, { ok: true, version: APP_VERSION, online: online.size });
+      return json(res, headers, 200, { ok: true, version: APP_VERSION, online: online.size });
     }
     if (url === '/api/info') {
-      return json(res, 200, { ...serverInfo, downloadUrl: config.downloadUrl });
+      return json(res, headers, 200, { ...serverInfo, downloadUrl: config.downloadUrl });
     }
-    if (site.handle(req, res)) return;
+    if (site.handle(req, res, headers)) return;
     if (url === '/' && !site.enabled) {
-      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+      res.writeHead(200, { ...headers, 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end(`${config.serverName} signaling server ${APP_VERSION} is running.\nBuild the web app (npm run build:web) to serve it here.\n`);
     }
-    res.writeHead(404, { ...SECURITY_HEADERS, 'Content-Type': 'text/plain; charset=utf-8' });
+    res.writeHead(404, { ...headers, 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not found\n');
   });
-  server.headersTimeout = 15_000;
-  server.requestTimeout = 30_000;
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.wsMessageBytes, perMessageDeflate: false });
 
@@ -99,8 +153,12 @@ export function createBeamServer(config: Config): BeamServer {
       socket.destroy();
       return;
     }
-    const ip = clientIp(req, config.trustProxy);
-    if ((perIp.get(ip) ?? 0) >= config.maxConnectionsPerIp || wss.clients.size >= config.maxClients) {
+    const ip = rateLimitKey(clientIp(req, config.trustProxy));
+    if (
+      (perIp.get(ip) ?? 0) >= config.maxConnectionsPerIp ||
+      wss.clients.size >= config.maxClients ||
+      !bucketFor(connectionsPerIp, ip, 0.5, 60).take()
+    ) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -117,16 +175,29 @@ export function createBeamServer(config: Config): BeamServer {
       id: null,
       name: '',
       alive: true,
+      closing: false,
+      registerAttempted: false,
       messages: new TokenBucket(40, 200),
+      bytes: new TokenBucket(256 * 1024, 1024 * 1024),
       requests: new TokenBucket(0.5, 15),
+      presence: new TokenBucket(0.2, 5),
       registerTimer: null,
     };
     client.registerTimer = setTimeout(() => {
-      if (!client.id) ws.close(4001, 'register timeout');
+      if (!client.id) shutdown(client, 4001, 'register timeout');
     }, 10_000);
 
     ws.on('pong', () => (client.alive = true));
-    ws.on('message', (data, isBinary) => onMessage(client, data, isBinary));
+    ws.on('message', (data, isBinary) => {
+      if (client.closing) return;
+      try {
+        onMessage(client, data, isBinary);
+      } catch (err) {
+        // Never let one bad message take the whole server down.
+        console.error('[server] message handling failed:', (err as Error).message);
+        fail(client, 'bad-request', 'invalid message', true);
+      }
+    });
     ws.on('close', () => {
       if (client.registerTimer) clearTimeout(client.registerTimer);
       const n = (perIp.get(ip) ?? 1) - 1;
@@ -138,12 +209,14 @@ export function createBeamServer(config: Config): BeamServer {
     send(client, { t: 'hello', challenge: client.challenge, server: serverInfo });
   }
 
-  function onMessage(client: Client, data: RawData, isBinary: boolean): void {
+  function onMessage(client: Client, data: RawData, isBinary: boolean): unknown {
     if (isBinary) return fail(client, 'bad-request', 'binary frames are not supported');
-    if (!client.messages.take()) return fail(client, 'rate-limited', 'slow down');
+    const text = data.toString();
+    if (!client.messages.take() || !client.bytes.take(text.length)) return fail(client, 'rate-limited', 'slow down');
+    if (!jsonDepthOk(text)) return fail(client, 'bad-request', 'message nested too deeply', true);
     let m: any;
     try {
-      m = JSON.parse(data.toString());
+      m = JSON.parse(text);
     } catch {
       return fail(client, 'bad-request', 'invalid JSON');
     }
@@ -153,25 +226,31 @@ export function createBeamServer(config: Config): BeamServer {
     if (m.t === 'ping') return send(client, { t: 'pong' });
     if (!client.id) return fail(client, 'not-registered', 'register first');
 
+    const rid = Number.isSafeInteger(m.rid) ? m.rid : 0;
     switch (m.t) {
       case 'signal':
+        if (text.length > LIMITS.signalBytes + 1024) return fail(client, 'too-large', 'signal too large');
         return onSignal(client, m);
       case 'presence': {
+        // Address-book refresh only: throttled so the ID space cannot be scanned quickly.
+        if (!client.presence.take()) return send(client, { t: 'presence', rid, online: {} });
         const ids: unknown[] = Array.isArray(m.ids) ? m.ids.slice(0, 100) : [];
         const result: Record<string, boolean> = {};
         for (const id of ids) if (typeof id === 'string' && /^\d{9}$/.test(id)) result[id] = online.has(id);
-        return send(client, { t: 'presence', rid: Number(m.rid) || 0, online: result });
+        return send(client, { t: 'presence', rid, online: result });
       }
       case 'ice':
-        return send(client, { t: 'ice', rid: Number(m.rid) || 0, ice: iceServersFor(config, client.id) as RTCIceServer[] });
+        return send(client, { t: 'ice', rid, ice: iceServersFor(config, client.id) as RTCIceServer[] });
       default:
         return fail(client, 'bad-request', 'unknown message type');
     }
   }
 
   function onRegister(client: Client, m: any): void {
-    if (client.id) return fail(client, 'bad-request', 'already registered');
-    if (config.accessKey && !safeEqual(String(m.key ?? ''), config.accessKey)) {
+    if (client.id || client.registerAttempted) return fail(client, 'bad-request', 'already registered', true);
+    client.registerAttempted = true; // one signature verification per connection
+    const key = typeof m.key === 'string' ? m.key.slice(0, 256) : '';
+    if (config.accessKey && !safeEqual(key, config.accessKey)) {
       return fail(client, 'access-key', 'This server requires a valid access key (Settings → Network).', true);
     }
     if (typeof m.pk !== 'string' || typeof m.sig !== 'string') return fail(client, 'bad-request', 'missing key', true);
@@ -184,14 +263,12 @@ export function createBeamServer(config: Config): BeamServer {
     if (!verifySignature(m.pk, registrationMessage(client.challenge), m.sig)) {
       return fail(client, 'bad-signature', 'signature check failed', true);
     }
-    if (config.newDevicesPerHour > 0 && !registry.has(id)) {
-      let entry = newIdsPerIp.get(client.ip);
-      if (!entry) {
-        entry = { bucket: new TokenBucket(config.newDevicesPerHour / 3600, config.newDevicesPerHour * 2), seen: 0 };
-        newIdsPerIp.set(client.ip, entry);
+    if (!registry.has(id)) {
+      if (registry.size >= config.maxDevices) return fail(client, 'server-full', 'This server cannot register more devices.', true);
+      const perNetwork = config.newDevicesPerHour > 0 ? bucketFor(newIdsPerIp, client.ip, config.newDevicesPerHour / 3600, config.newDevicesPerHour * 2) : null;
+      if ((perNetwork && !perNetwork.take()) || (config.newDevicesGlobalPerHour > 0 && !newIdsGlobal.take())) {
+        return fail(client, 'rate-limited', 'Too many new devices right now. Try again later.', true);
       }
-      entry.seen = Date.now();
-      if (!entry.bucket.take()) return fail(client, 'rate-limited', 'Too many new devices from this network. Try again later.', true);
     }
     if (!registry.claim(id, m.pk)) {
       return fail(client, 'id-conflict', 'This ID belongs to another device.', true);
@@ -200,7 +277,7 @@ export function createBeamServer(config: Config): BeamServer {
     if (previous && previous !== client) {
       send(previous, { t: 'replaced' });
       previous.id = null;
-      previous.ws.close(4002, 'replaced');
+      shutdown(previous, 4002, 'replaced');
     }
     if (client.registerTimer) clearTimeout(client.registerTimer);
     client.id = id;
@@ -209,33 +286,60 @@ export function createBeamServer(config: Config): BeamServer {
     send(client, { t: 'registered', id, ice: iceServersFor(config, id) as RTCIceServer[] });
   }
 
-  function onSignal(client: Client, m: any): void {
+  function onSignal(client: Client, m: any): unknown {
     const { to, sid, kind } = m;
     if (typeof to !== 'string' || !/^\d{9}$/.test(to)) return fail(client, 'bad-request', 'invalid target');
-    if (typeof sid !== 'string' || sid.length > 64 || !SIGNAL_KINDS.has(kind)) return fail(client, 'bad-request', 'invalid signal');
+    if (typeof sid !== 'string' || !SIGNAL_RE.test(sid) || !SIGNAL_KINDS.has(kind)) return fail(client, 'bad-request', 'invalid signal');
     if (to === client.id) return fail(client, 'bad-request', 'cannot signal yourself');
     const expensive = (kind === 'offer' && !m.data?.restart) || kind === 'invite';
     if (expensive && !client.requests.take()) {
       return send(client, { t: 'undeliverable', to, sid, reason: 'rate-limited' });
     }
     const target = online.get(to);
-    if (!target) return send(client, { t: 'undeliverable', to, sid, reason: 'offline' });
-    send(target, { t: 'signal', from: client.id!, sid, kind, data: m.data });
+    if (!target) {
+      // "Offline" answers reveal presence: they cost a request token so IDs cannot be scanned this way.
+      if (expensive || client.requests.take()) send(client, { t: 'undeliverable', to, sid, reason: 'offline' });
+      return;
+    }
+    if (!send(target, { t: 'signal', from: client.id!, sid, kind, data: m.data })) {
+      send(client, { t: 'undeliverable', to, sid, reason: 'rate-limited' });
+    }
   }
 
-  function send(client: Client, msg: ServerToClient): void {
-    if (client.ws.readyState === WebSocket.OPEN) client.ws.send(JSON.stringify(msg));
+  /** Returns false if the message was dropped because the receiver is not reading fast enough. */
+  function send(client: Client, msg: ServerToClient): boolean {
+    if (client.ws.readyState !== WebSocket.OPEN) return false;
+    if (client.ws.bufferedAmount > MAX_BUFFERED) {
+      if (client.ws.bufferedAmount > 4 * MAX_BUFFERED) shutdown(client, 4004, 'too slow');
+      return false;
+    }
+    client.ws.send(JSON.stringify(msg));
+    return true;
+  }
+
+  function shutdown(client: Client, code: number, reason: string): void {
+    if (client.closing) return;
+    client.closing = true;
+    client.ws.close(code, reason);
+    // ws keeps the socket in CLOSING until the peer answers; do not let it linger.
+    setTimeout(() => client.ws.terminate(), 1000).unref();
   }
 
   function fail(client: Client, code: Extract<ServerToClient, { t: 'error' }>['code'], message: string, fatal = false): void {
     send(client, { t: 'error', code, message, fatal });
-    if (fatal) client.ws.close(4003, code);
+    if (fatal) shutdown(client, 4003, code);
   }
 
   // Drop connections that stopped answering pings (sleeping laptops, dead NAT mappings).
+  let lastPrune = Date.now();
   const heartbeat = setInterval(() => {
     const now = Date.now();
+    if (now - lastPrune > 3600_000) {
+      lastPrune = now;
+      registry.prune();
+    }
     for (const [ip, e] of newIdsPerIp) if (now - e.seen > 3 * 3600_000) newIdsPerIp.delete(ip);
+    for (const [ip, e] of connectionsPerIp) if (now - e.seen > 600_000) connectionsPerIp.delete(ip);
     for (const c of online.values()) {
       if (!c.alive) {
         c.ws.terminate();
@@ -269,9 +373,17 @@ export function createBeamServer(config: Config): BeamServer {
   };
 }
 
-function json(res: http.ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function json(res: http.ServerResponse, headers: Record<string, string>, status: number, body: unknown): void {
+  res.writeHead(status, { ...headers, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
+}
+
+/** True when the browser reached us over HTTPS (directly or through a trusted proxy). */
+function isSecure(req: http.IncomingMessage, trustProxy: boolean): boolean {
+  if ((req.socket as { encrypted?: boolean }).encrypted) return true;
+  if (!trustProxy) return false;
+  const proto = req.headers['x-forwarded-proto'];
+  return (Array.isArray(proto) ? proto[0] : proto)?.split(',')[0]?.trim() === 'https';
 }
 
 function clientIp(req: http.IncomingMessage, trustProxy: boolean): string {

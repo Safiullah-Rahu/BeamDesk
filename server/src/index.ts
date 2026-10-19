@@ -1,8 +1,19 @@
-import { loadConfig } from './config.ts';
+import { configErrors, configWarnings, loadConfig } from './config.ts';
 import { createBeamServer } from './server.ts';
 import { APP_VERSION } from '@beamdesk/core/protocol';
 
 const config = loadConfig();
+const errors = configErrors(config);
+if (errors.length) {
+  for (const e of errors) console.error(`Configuration error: ${e}`);
+  process.exit(1);
+}
+for (const w of configWarnings(config)) console.warn(`Warning: ${w}`);
+
+// Log and keep serving: one bad request must not take every session down.
+process.on('uncaughtException', (err) => console.error('[uncaught]', err));
+process.on('unhandledRejection', (err) => console.error('[unhandled rejection]', err));
+
 const server = createBeamServer(config);
 const port = await server.listen();
 

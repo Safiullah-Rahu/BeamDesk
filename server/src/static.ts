@@ -36,27 +36,40 @@ const TYPES: Record<string, string> = {
 
 const COMPRESSIBLE = /^(text\/|application\/(json|manifest)|image\/svg)/;
 
-export const SECURITY_HEADERS: Record<string, string> = {
-  'Content-Security-Policy': [
+const BASE_HEADERS: Record<string, string> = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Permissions-Policy': 'display-capture=(self), clipboard-read=(self), clipboard-write=(self), fullscreen=(self), camera=(), microphone=(), geolocation=()',
+};
+
+/**
+ * Security headers. Pages served over HTTPS may only talk to TLS endpoints (wss:/https:);
+ * plain-HTTP pages (local testing) also need ws:/http:. HTTPS responses add HSTS.
+ */
+export function securityHeaders(secure: boolean): Record<string, string> {
+  const csp = [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "media-src 'self' blob: mediastream:",
-    "connect-src 'self' ws: wss: https:",
+    secure ? "connect-src 'self' wss: https:" : "connect-src 'self' ws: wss: http: https:",
     "font-src 'self' data:",
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'none'",
     "frame-ancestors 'none'",
     "form-action 'self'",
-  ].join('; '),
-  'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
-  'Referrer-Policy': 'no-referrer',
-  'Cross-Origin-Opener-Policy': 'same-origin',
-  'Permissions-Policy': 'display-capture=(self), clipboard-read=(self), clipboard-write=(self), fullscreen=(self), camera=(), microphone=(), geolocation=()',
-};
+  ].join('; ');
+  return {
+    ...BASE_HEADERS,
+    'Content-Security-Policy': csp,
+    ...(secure ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
+  };
+}
 
 export class StaticSite {
   private assets = new Map<string, Asset>();
@@ -94,7 +107,7 @@ export class StaticSite {
   }
 
   /** Returns true if the request was handled. */
-  handle(req: IncomingMessage, res: ServerResponse): boolean {
+  handle(req: IncomingMessage, res: ServerResponse, security: Record<string, string>): boolean {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     let pathname: string;
     try {
@@ -109,7 +122,7 @@ export class StaticSite {
     if (!asset) return false;
 
     const headers: Record<string, string> = {
-      ...SECURITY_HEADERS,
+      ...security,
       'Content-Type': asset.type,
       ETag: asset.etag,
       'Cache-Control': asset.immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
