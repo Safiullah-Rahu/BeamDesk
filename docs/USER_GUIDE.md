@@ -59,7 +59,7 @@ The pill in the corner tells you whether BeamDesk is **Ready**. If it says *Offl
    - Untick *Control mouse & keyboard* if you only want them to watch.
 4. A red bar at the top of your screen shows that someone is connected. Click **Disconnect** on it at any time.
 
-**Even faster:** click **Copy invite link** and send it by WhatsApp, e-mail or SMS. Your helper opens it and is connected straight away — the link contains your one-time password, which changes after every session.
+**Even faster:** click **Copy invite link** and send it by WhatsApp, e-mail or SMS. Your helper opens it, clicks **Connect**, and is in — the link contains your one-time password (which changes after every session) and your device's security key, so it can only reach *your* computer.
 
 **Prefer not to click Accept?** Read out the **one-time password** too. When your helper enters it, they connect without the prompt. A new password is created after every session, so it can't be reused.
 

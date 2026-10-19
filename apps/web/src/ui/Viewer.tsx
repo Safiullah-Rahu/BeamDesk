@@ -157,7 +157,8 @@ export function Viewer({ tab, active }: { tab: Tab; active: boolean }) {
     if (!active || s.state !== 'connected') return;
     const onFocus = () => void pushClipboard();
     window.addEventListener('focus', onFocus);
-    const poll = platform.kind === 'desktop' ? setInterval(onFocus, 1000) : null;
+    // Desktop: keep the clipboard in sync while the user works in this window - never in the background.
+    const poll = platform.kind === 'desktop' ? setInterval(() => document.hasFocus() && onFocus(), 1000) : null;
     return () => {
       window.removeEventListener('focus', onFocus);
       if (poll) clearInterval(poll);

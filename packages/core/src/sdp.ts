@@ -20,6 +20,36 @@ export function channelIdentifier(localSdp: string, remoteSdp: string): string {
   return [local.join(','), remote.join(',')].sort().join('|');
 }
 
+/**
+ * Removes ICE candidates embedded in a remote SDP and returns them separately, so they can go
+ * through the same gate as trickled candidates (a peer must not bypass it by inlining them).
+ */
+export function splitCandidates(sdp: string): { sdp: string; candidates: RTCIceCandidateInit[] } {
+  const lines = sdp.split('\r\n');
+  const mids: (string | undefined)[] = [];
+  let idx = -1;
+  for (const l of lines) {
+    if (l.startsWith('m=')) mids[++idx] = undefined;
+    else if (idx >= 0 && l.startsWith('a=mid:')) mids[idx] = l.slice(6).trim();
+  }
+  const out: string[] = [];
+  const candidates: RTCIceCandidateInit[] = [];
+  idx = -1;
+  for (const l of lines) {
+    if (l.startsWith('m=')) idx++;
+    if (l.startsWith('a=candidate:')) {
+      if (idx >= 0) candidates.push({ candidate: l.slice(2), sdpMid: mids[idx], sdpMLineIndex: idx });
+      continue;
+    }
+    if (l.startsWith('a=end-of-candidates')) continue;
+    out.push(l);
+  }
+  return { sdp: out.join('\r\n'), candidates };
+}
+
+/** Stable string of an SDP's DTLS fingerprints, for "did the peer's certificate change?" checks. */
+export const fingerprintKey = (sdp: string) => extractFingerprints(sdp).join(',');
+
 export type CodecName = 'AV1' | 'VP9' | 'H264' | 'VP8';
 export type CodecPreference = 'auto' | CodecName;
 export const CODECS: CodecName[] = ['AV1', 'VP9', 'H264', 'VP8'];

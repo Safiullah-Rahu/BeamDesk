@@ -12,8 +12,9 @@ import {
   type CpaceState,
   type PasswordSlot,
 } from './cpace.ts';
-import { Identity, publicKeyMatchesId, verifySignature } from './identity.ts';
+import { Identity, keyHash, publicKeyMatchesId, verifySignature } from './identity.ts';
 import {
+  acceptTranscript,
   APP_VERSION,
   decodePointerMove,
   hostTranscript,
@@ -34,9 +35,10 @@ import {
   type Platform,
   type QualitySettings,
   type ViewerAuth,
+  VIEW_ONLY_PERMISSIONS,
 } from './protocol.ts';
 import { CandidateGate, createPeer, sendControl, type PeerChannels } from './peer.ts';
-import { addBitrateHints, channelIdentifier, orderCodecs, type CodecPreference } from './sdp.ts';
+import { addBitrateHints, channelIdentifier, fingerprintKey, orderCodecs, splitCandidates, type CodecPreference } from './sdp.ts';
 import { chooseCodecs, planQuality } from './quality.ts';
 import { FileTransfers, type FileSinkFactory, type Transfer } from './files.ts';
 import { codeToKey } from './keymap.ts';
@@ -130,6 +132,7 @@ type ServiceEvents = {
 };
 
 const PROMPT_TIMEOUT = 60_000;
+const MAX_PENDING = 6;
 const MAX_FAILURES = 5;
 const FAILURE_WINDOW = 10 * 60_000;
 const LOCK_TIME = 5 * 60_000;
@@ -139,7 +142,7 @@ export class HostService extends Emitter<ServiceEvents> {
   private failures: number[] = [];
   private lockedUntil = 0;
   private declined = new Map<string, number>();
-  private preapproved = new Map<string, { perms: Permissions; until: number }>();
+  private preapproved = new Map<string, { keyHash: string; perms: Permissions; until: number }>();
   private off: (() => void) | null = null;
 
   readonly opts: HostServiceOptions;
@@ -172,9 +175,12 @@ export class HostService extends Emitter<ServiceEvents> {
     for (const s of [...this.sessions.values()]) s.close(reason);
   }
 
-  /** Lets a specific device in without a prompt, once, for a limited time (help links). */
-  preapprove(viewerId: string, perms: Permissions, ttlMs = 10 * 60_000): void {
-    this.preapproved.set(viewerId, { perms, until: Date.now() + ttlMs });
+  /**
+   * Lets one specific device in without a prompt, once, for a limited time (help links).
+   * Bound to the device's key hash: a 9-digit ID alone is too short to trust.
+   */
+  preapprove(viewerId: string, viewerKeyHash: string, perms: Permissions, ttlMs = 10 * 60_000): void {
+    this.preapproved.set(viewerId, { keyHash: viewerKeyHash, perms, until: Date.now() + ttlMs });
   }
 
   isLocked(): boolean {
@@ -182,9 +188,9 @@ export class HostService extends Emitter<ServiceEvents> {
   }
 
   /** @internal */
-  takePreapproval(viewerId: string): Permissions | null {
+  takePreapproval(viewerId: string, viewerKey: string): Permissions | null {
     const p = this.preapproved.get(viewerId);
-    if (!p) return null;
+    if (!p || p.keyHash !== keyHash(viewerKey)) return null;
     this.preapproved.delete(viewerId);
     return p.until > Date.now() ? p.perms : null;
   }
@@ -235,8 +241,10 @@ export class HostService extends Emitter<ServiceEvents> {
     if (this.opts.trust.isBlocked(s.from)) return void reject('blocked');
     if ((this.declined.get(s.from) ?? 0) > Date.now()) return void reject('declined');
     const live = [...this.sessions.values()].filter((x) => x.phase !== 'closed');
-    if (live.length >= Math.max(1, this.opts.settings.maxSessions)) return void reject('busy');
-    if (live.some((x) => x.viewerId === s.from && x.phase !== 'active')) return void reject('busy');
+    const pending = live.filter((x) => x.phase !== 'active');
+    // Only accepted sessions count toward the limit, so unauthenticated requests cannot block it.
+    if (live.length - pending.length >= Math.max(1, this.opts.settings.maxSessions)) return void reject('busy');
+    if (pending.length >= MAX_PENDING || pending.some((x) => x.viewerId === s.from)) return void reject('busy');
 
     const session = new HostSession(this, s.from, s.sid);
     this.sessions.set(s.sid, session);
@@ -288,6 +296,10 @@ export class HostSession extends Emitter<SessionEvents> {
   private captureWidth = 1920;
   private switching: Promise<void> = Promise.resolve();
   private encoding: Promise<void> = Promise.resolve();
+  /** Candidates that arrive while the peer connection is still being created. */
+  private earlyIce: RTCIceCandidateInit[] = [];
+  /** The viewer's DTLS certificate, pinned for ICE restarts. */
+  private remoteFingerprints = '';
 
   private readonly service: HostService;
   readonly viewerId: string;
@@ -299,9 +311,10 @@ export class HostSession extends Emitter<SessionEvents> {
     this.viewerId = viewerId;
     this.sid = sid;
     const o = service.opts;
-    this.perms = { ...o.settings.defaultPerms };
+    // No permissions at all until the session is accepted.
+    this.perms = { ...VIEW_ONLY_PERMISSIONS };
     this.quality = { ...o.settings.quality };
-    this.files = new FileTransfers(o.platform.fileSink, () => this.perms.files && o.platform.capabilities().files);
+    this.files = new FileTransfers(o.platform.fileSink, () => this.phase === 'active' && this.perms.files && o.platform.capabilities().files);
     this.files.on('update', (l) => this.emit('transfers', l));
     this.files.on('received', (t) => this.emit('file-received', t));
   }
@@ -321,8 +334,9 @@ export class HostSession extends Emitter<SessionEvents> {
       const { pc, channels } = createPeer(ice, this.o.settings.forceRelay);
       this.pc = pc;
       this.channels = channels;
-      this.gate = new CandidateGate(pc, (c) => this.signal('ice', c));
-      pc.onicecandidate = (e) => this.gate?.onLocal(e.candidate);
+      const gate = new CandidateGate(pc, (c) => this.signal('ice', c));
+      this.gate = gate;
+      pc.onicecandidate = (e) => gate.onLocal(e.candidate);
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === 'failed' && this.phase === 'active') {
           // The viewer drives ICE restarts; give it time before giving up.
@@ -337,12 +351,15 @@ export class HostSession extends Emitter<SessionEvents> {
       channels.pointer.onmessage = (e) => this.onPointer(e.data);
       this.files.attach(channels.files);
 
-      const hinted = addBitrateHints(offer.sdp, 2500);
+      // Candidates inlined in the SDP must pass the same gate as trickled ones.
+      const { sdp: clean, candidates } = splitCandidates(offer.sdp);
       try {
-        await pc.setRemoteDescription({ type: 'offer', sdp: hinted });
+        await pc.setRemoteDescription({ type: 'offer', sdp: addBitrateHints(clean, 2500) });
       } catch {
-        await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+        await pc.setRemoteDescription({ type: 'offer', sdp: clean });
       }
+      this.remoteFingerprints = fingerprintKey(clean);
+      for (const c of [...candidates, ...this.earlyIce.splice(0)]) await gate.onRemote(c);
       const caps = this.o.platform.capabilities();
       const codecs = await chooseCodecs((offer.prefs?.codec as CodecPreference) ?? this.o.settings.codec);
       for (const t of pc.getTransceivers()) {
@@ -411,17 +428,24 @@ export class HostSession extends Emitter<SessionEvents> {
         await this.onAuth(s.data as ViewerAuth);
         break;
       case 'ice':
-        if (s.data && typeof s.data === 'object') await this.gate?.onRemote(s.data);
+        if (!s.data || typeof s.data !== 'object') break;
+        if (this.gate) await this.gate.onRemote(s.data);
+        else if (this.earlyIce.length < 64) this.earlyIce.push(s.data);
         break;
       case 'offer': {
         const offer = s.data as OfferData;
-        if (!offer?.restart || this.phase !== 'active' || !this.pc || typeof offer.sdp !== 'string') return;
+        if (!offer?.restart || this.phase !== 'active' || !this.pc || typeof offer.sdp !== 'string' || offer.sdp.length > 40_000) return;
+        const { sdp: clean, candidates } = splitCandidates(offer.sdp);
+        // An ICE restart must come from the same, authenticated certificate; anything else is
+        // an attempt to splice a different DTLS endpoint into the session.
+        if (fingerprintKey(clean) !== this.remoteFingerprints) return this.close('bad-identity');
         try {
-          await this.pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+          await this.pc.setRemoteDescription({ type: 'offer', sdp: clean });
           const answer = await this.pc.createAnswer();
           await this.pc.setLocalDescription(answer);
           this.signal('answer', { sdp: answer.sdp!, restart: true } satisfies AnswerData);
           await this.gate?.flushRemote();
+          for (const c of candidates) await this.gate?.onRemote(c);
         } catch (err) {
           console.warn('[beamdesk] ICE restart answer failed', err);
         }
@@ -477,7 +501,7 @@ export class HostSession extends Emitter<SessionEvents> {
     const defaults = { ...settings.defaultPerms };
     if (slot === 'perm') return this.accept(defaults, 'perm');
     if (slot === 'otp' && !settings.askEvenWithPassword) return this.accept(defaults, 'otp');
-    const pre = this.service.takePreapproval(this.viewerId);
+    const pre = this.service.takePreapproval(this.viewerId, a.pk);
     if (pre) return this.accept(pre, 'invite');
     const known = trust.isTrusted(this.viewerId, a.pk);
     if (!slot && known && settings.trustedAutoAccept) return this.accept(defaults, 'trusted');
@@ -531,8 +555,13 @@ export class HostSession extends Emitter<SessionEvents> {
     this.startedAt = Date.now();
     const slot = via === 'otp' || via === 'perm' ? via : null;
     const tag = slot && this.isk ? toBase64Url(confirmationTag(this.isk, 'host', this.sid, this.ci)) : undefined;
-    this.signal('auth-result', { ok: true, slot, tag, perms: this.perms } satisfies AuthResult);
+    const sig = this.o.identity.sign(utf8(acceptTranscript(this.sid, this.ci, this.viewerId, slot, this.perms)));
+    this.signal('auth-result', { ok: true, slot, tag, perms: this.perms, sig } satisfies AuthResult);
     this.setPhase('active');
+    // Do not keep capturing for a viewer whose connection never comes up.
+    this.after(45_000, () => {
+      if (this.channels?.control.readyState !== 'open') this.close('connection-failed');
+    });
     await this.gate?.release();
     try {
       await this.startCapture(null);
@@ -730,6 +759,7 @@ export class HostSession extends Emitter<SessionEvents> {
     const caps = this.o.platform.capabilities();
     const next = { control: p.control && caps.control, clipboard: p.clipboard && caps.clipboard, files: p.files && caps.files, audio: p.audio && caps.audio };
     if (this.perms.control && !next.control) this.o.platform.input?.(this.displayId, { k: 'release' });
+    if (this.perms.files && !next.files) this.files.cancelAll();
     const audioChanged = next.audio !== this.perms.audio;
     this.perms = next;
     sendControl(this.channels?.control, { t: 'perms', perms: next });

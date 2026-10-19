@@ -129,3 +129,26 @@ test('file names are sanitised', () => {
   assert.equal(sanitizeFileName('a'.repeat(300) + '.pdf').length, 255);
   assert.ok(sanitizeFileName('a'.repeat(300) + '.pdf').endsWith('.pdf'));
 });
+
+test('embedded ICE candidates are split out of SDP (so the host gate cannot be bypassed)', async () => {
+  const { splitCandidates, fingerprintKey } = await import('../src/sdp.ts');
+  const sdp = [
+    'v=0',
+    'a=fingerprint:sha-256 AA:BB',
+    'm=video 9 UDP/TLS/RTP/SAVPF 96',
+    'a=candidate:1 1 udp 2122260223 203.0.113.7 50000 typ host',
+    'a=mid:0',
+    'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+    'a=mid:1',
+    'a=candidate:2 1 udp 2122260223 203.0.113.7 50001 typ host',
+    'a=end-of-candidates',
+    '',
+  ].join('\r\n');
+  const { sdp: clean, candidates } = splitCandidates(sdp);
+  assert.ok(!clean.includes('a=candidate'));
+  assert.ok(!clean.includes('end-of-candidates'));
+  assert.ok(clean.endsWith('\r\n'));
+  assert.deepEqual(candidates.map((c) => [c.sdpMid, c.sdpMLineIndex]), [['0', 0], ['1', 1]]);
+  assert.match(candidates[0].candidate!, /^candidate:1 /);
+  assert.equal(fingerprintKey(clean), fingerprintKey(sdp));
+});

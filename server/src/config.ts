@@ -19,6 +19,8 @@ export interface Config {
   iceServersJson: string;
   maxClients: number;
   maxConnectionsPerIp: number;
+  /** New device IDs one IP address may register per hour (0 = unlimited). */
+  newDevicesPerHour: number;
   trustProxy: boolean;
   downloadUrl: string;
 }
@@ -59,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     iceServersJson: env.ICE_SERVERS_JSON || '',
     maxClients: int(env.MAX_CLIENTS, 20_000),
     maxConnectionsPerIp: int(env.MAX_CONNECTIONS_PER_IP, 50),
+    newDevicesPerHour: env.NEW_DEVICES_PER_HOUR === '0' ? 0 : int(env.NEW_DEVICES_PER_HOUR, 60),
     trustProxy: /^(1|true|yes)$/i.test(env.TRUST_PROXY || ''),
     downloadUrl: env.DOWNLOAD_URL || 'https://github.com/Safiullah-Rahu/BeamDesk/releases/latest',
   };

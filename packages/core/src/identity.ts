@@ -4,8 +4,9 @@
  * Every BeamDesk device owns an Ed25519 key pair that never leaves the device.
  * Its public 9-digit ID is derived from the public key, so:
  *  - the signaling server can verify that a device really owns the ID it registers, and
- *  - peers can verify, end to end, that they talk to the device behind the ID they typed
- *    (the signaling server cannot impersonate a device without its private key).
+ *  - peers can verify, end to end, that the key they talk to hashes to the ID they typed.
+ * A 9-digit ID carries only ~30 bits, so links also carry a 128-bit key hash (keyHash) and
+ * viewers pin keys after the first session; see docs/SECURITY_MODEL.md.
  */
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -97,6 +98,17 @@ export function publicKeyMatchesId(publicKeyB64: string, deviceId: string): bool
 export function registrationMessage(challenge: string): Uint8Array {
   return concatBytes(utf8('BeamDesk-register-v1:'), utf8(challenge));
 }
+
+/** 128-bit hash of a public key, embedded in invite and help links (22 base64url chars). */
+export function keyHash(publicKeyB64: string): string {
+  try {
+    return toBase64Url(sha256(concatBytes(utf8('BeamDesk-keyhash-v1'), fromBase64Url(publicKeyB64))).slice(0, 16));
+  } catch {
+    return '';
+  }
+}
+
+export const isKeyHash = (s: unknown): s is string => typeof s === 'string' && /^[A-Za-z0-9_-]{22}$/.test(s);
 
 /**
  * Short fingerprint of a public key for humans (e.g. when an identity changes):

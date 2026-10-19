@@ -9,7 +9,7 @@
  *   viewer <--auth-result (host confirmation tag, permissions)-- host
  * Only after a successful auth-result does the host release its ICE candidates.
  */
-import { channelIdentifier, orderCodecs, type CodecName, type CodecPreference } from './sdp.ts';
+import { channelIdentifier, fingerprintKey, orderCodecs, splitCandidates, type CodecName, type CodecPreference } from './sdp.ts';
 import {
   confirmationTag,
   cpaceFinish,
@@ -20,8 +20,9 @@ import {
   verifyConfirmation,
   type PasswordSlot,
 } from './cpace.ts';
-import { Identity, publicKeyMatchesId, verifySignature } from './identity.ts';
+import { Identity, keyHash, publicKeyMatchesId, verifySignature } from './identity.ts';
 import {
+  acceptTranscript,
   APP_VERSION,
   encodePointerMove,
   hostTranscript,
@@ -65,6 +66,8 @@ export interface ViewerOptions {
   pinnedKey?: string;
   /** The user explicitly accepted that the host's key changed. */
   acceptNewKey?: boolean;
+  /** 128-bit key hash from an invite link: the host must have exactly this key. */
+  expectedKeyHash?: string;
   /** Translate Cmd <-> Ctrl between macOS and other systems. */
   swapCmdCtrl?: boolean;
   fileSink: FileSinkFactory;
@@ -119,6 +122,8 @@ export class ViewerSession extends Emitter<Events> {
   private pc: RTCPeerConnection | null = null;
   private channels: PeerChannels | null = null;
   private ci = '';
+  /** The host's verified DTLS certificate, pinned for ICE restarts. */
+  private remoteFingerprints = '';
   private isk: Partial<Record<PasswordSlot, Uint8Array>> = {};
   private accepted = false;
   private pendingIce: RTCIceCandidateInit[] = [];
@@ -156,6 +161,7 @@ export class ViewerSession extends Emitter<Events> {
     } catch {
       return this.finish('server');
     }
+    if (this.state === 'closed') return; // closed while waiting for the server
     if (this.hostId === signaling.id) return this.finish('self');
 
     this.offs.push(
@@ -168,7 +174,7 @@ export class ViewerSession extends Emitter<Events> {
     );
 
     const ice = await signaling.refreshIce();
-    if (this.state === 'closed') return;
+    if ((this.state as ViewerState) === 'closed') return;
     const { pc, channels } = createPeer(ice, !!this.opts.forceRelay);
     this.pc = pc;
     this.channels = channels;
@@ -211,7 +217,7 @@ export class ViewerSession extends Emitter<Events> {
     };
     if (!this.signal('offer', data)) return this.finish('server');
     this.after(20_000, () => {
-      if (this.state === 'connecting') this.finish('timeout');
+      if (this.state === 'connecting') this.close('timeout');
     });
   }
 
@@ -346,20 +352,24 @@ export class ViewerSession extends Emitter<Events> {
       }
     } catch (err) {
       console.warn('[beamdesk] viewer signal failed', err);
-      this.finish('connection-failed');
+      this.close('connection-failed');
     }
   }
 
   private async onAnswer(a: AnswerData): Promise<void> {
     const pc = this.pc;
     if (!pc || !a || typeof a.sdp !== 'string') return;
+    const { sdp: clean, candidates } = splitCandidates(a.sdp);
     if (a.restart) {
-      if (pc.signalingState === 'have-local-offer') await pc.setRemoteDescription({ type: 'answer', sdp: a.sdp });
+      // Only answers to our own ICE restart, and only from the certificate we already verified.
+      if (!this.accepted || this.state !== 'reconnecting' || pc.signalingState !== 'have-local-offer') return;
+      if (fingerprintKey(clean) !== this.remoteFingerprints) return this.close('bad-identity');
+      await pc.setRemoteDescription({ type: 'answer', sdp: clean });
+      for (const c of candidates) await pc.addIceCandidate(c).catch(() => undefined);
       return;
     }
     if (this.state !== 'connecting' || pc.signalingState !== 'have-local-offer') return;
-    await pc.setRemoteDescription({ type: 'answer', sdp: a.sdp });
-    for (const c of this.pendingIce.splice(0)) await pc.addIceCandidate(c).catch(() => undefined);
+    await pc.setRemoteDescription({ type: 'answer', sdp: clean });
 
     const hello = a.hello as HostHello | undefined;
     if (!hello || hello.v !== PROTOCOL_VERSION) return this.close('unsupported');
@@ -370,9 +380,15 @@ export class ViewerSession extends Emitter<Events> {
     if (!publicKeyMatchesId(hello.pk, this.hostId) || !verifySignature(hello.pk, utf8(hostTranscript(this.sid, this.ci, me)), hello.sig)) {
       return this.close('bad-identity');
     }
+    if (this.opts.expectedKeyHash && keyHash(hello.pk) !== this.opts.expectedKeyHash) {
+      return this.close('bad-identity');
+    }
     if (this.opts.pinnedKey && this.opts.pinnedKey !== hello.pk && !this.opts.acceptNewKey) {
       return this.close('identity-changed');
     }
+    this.remoteFingerprints = fingerprintKey(clean);
+    // The host is verified: now its candidates may be used.
+    for (const c of [...candidates, ...this.pendingIce.splice(0)]) await pc.addIceCandidate(c).catch(() => undefined);
     this.host = {
       id: this.hostId,
       name: sanitizeName(hello.name),
@@ -414,7 +430,15 @@ export class ViewerSession extends Emitter<Events> {
 
   private onAuthResult(r: AuthResult): void {
     if (this.accepted || this.state === 'closed' || !r) return;
-    if (!r.ok) return this.finish(r.reason || 'declined');
+    if (!r.ok) return this.finish(typeof r.reason === 'string' ? r.reason : 'declined');
+    // Acceptance is only meaningful after we verified the host and sent our authentication,
+    // and it must be signed by that host (the server cannot forge it).
+    if (!this.host || (this.state !== 'authenticating' && this.state !== 'waiting')) return;
+    const perms: Permissions = { ...VIEW_ONLY_PERMISSIONS, ...r.perms };
+    const slot = r.slot === 'otp' || r.slot === 'perm' ? r.slot : null;
+    if (typeof r.sig !== 'string' || !verifySignature(this.host.publicKey, utf8(acceptTranscript(this.sid, this.ci, this.opts.signaling.id, slot, perms)), r.sig)) {
+      return this.close('bad-identity');
+    }
     if (r.slot) {
       // Mutual authentication: the host must prove it knows the same password.
       const isk = this.isk[r.slot];
@@ -427,7 +451,7 @@ export class ViewerSession extends Emitter<Events> {
       this.host.via = r.slot ?? 'approval';
       this.emit('host', this.host);
     }
-    this.perms = { ...VIEW_ONLY_PERMISSIONS, ...r.perms };
+    this.perms = perms;
     this.emit('perms', this.perms);
     this.setState(this.channels?.control.readyState === 'open' ? 'connected' : 'starting');
     // If the transport has not come up quickly (e.g. a stale candidate pair), renegotiate ICE.
@@ -435,7 +459,7 @@ export class ViewerSession extends Emitter<Events> {
       if (this.state === 'starting') void this.restartIce();
     });
     this.after(45_000, () => {
-      if (this.state === 'starting' || this.state === 'reconnecting') this.finish('connection-failed');
+      if (this.state === 'starting' || this.state === 'reconnecting') this.close('connection-failed');
     });
   }
 
@@ -499,7 +523,7 @@ export class ViewerSession extends Emitter<Events> {
   private async restartIce(): Promise<void> {
     const pc = this.pc;
     if (!pc || this.state === 'closed') return;
-    if (this.restarts >= 5) return this.finish('connection-failed');
+    if (this.restarts >= 5) return this.close('connection-failed');
     this.restarts++;
     this.setState('reconnecting');
     try {

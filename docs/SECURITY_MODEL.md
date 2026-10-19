@@ -21,8 +21,11 @@ To report a vulnerability, see [SECURITY.md](../SECURITY.md).
 | **Channel binding** | `channel-id` = the sorted pair of DTLS certificate fingerprints from the SDP offer and answer. A man-in-the-middle that terminates DTLS on both sides necessarily presents different fingerprints to each side, so signatures and PAKE confirmations fail. |
 | **CPace PAKE (ristretto255)** | Password authentication without ever sending the password, not even hashed. Offline dictionary attacks against observed traffic are impossible; every guess needs a live attempt. Run in parallel for the one-time password slot and the permanent password slot. Mutual: the host proves knowledge of the password too. |
 | **Trust on first use (viewer side)** | After the first successful session the viewer pins the host's public key. A changed key aborts the connection with a clear warning. |
-| **Candidate gating** | The host holds back its ICE candidates and does not run connectivity checks until the request is accepted, so unapproved viewers never learn its IP addresses. |
-| **Rate limits** | Host: 5 wrong passwords within 10 minutes lock password login for 5 minutes; declined viewers are ignored for 30 s; one pending prompt per viewer. Server: per-connection message rate, per-device connection-request rate, per-IP connection limit. |
+| **Candidate gating** | The host holds back its ICE candidates and does not run connectivity checks until the request is accepted, so unapproved viewers never learn its IP addresses. Candidates a viewer inlines in its SDP are stripped and gated the same way. Before acceptance a session has no permissions at all (no files, no input). |
+| **Signed acceptance** | The host signs `sid ‖ channel-id ‖ viewer-ID ‖ slot ‖ permissions` when it accepts; the viewer ignores acceptances that are unsigned, out of order, or not from the verified host. |
+| **Pinned certificates on ICE restart** | Network-change recovery (ICE restarts) is accepted only if the peer's DTLS certificate is unchanged, so nobody can splice another endpoint into a running session. |
+| **Key-bound links** | Invite and help links carry a 128-bit hash of the sender's public key. A help link pre-approves exactly that key (not just the 9-digit ID); an invite link makes the viewer refuse any other key. Links never connect on their own: the app asks first. |
+| **Rate limits** | Host: 5 wrong passwords within 10 minutes lock password login for 5 minutes; declined viewers are ignored for 30 s; one pending request per viewer and at most 6 pending overall (only accepted sessions count toward the session limit). Server: per-connection message rate, per-device connection-request rate, per-IP connection limit, per-IP limit on registering new device IDs. |
 
 ### Password derivation
 
@@ -55,7 +58,7 @@ sequenceDiagram
   S->>H: auth
   Note over H: verify pk_V → ID_V, sig_V, password tag
   H-->>V: pending (accept prompt shown)
-  H->>V: auth-result {ok, perms, host tag}
+  H->>V: auth-result {ok, perms, host tag, sig_H(sid,CI,ID_V,slot,perms)}
   Note over H: releases ICE candidates only now
   V->>H: WebRTC connects directly (DTLS) — media and data channels
 ```
@@ -72,12 +75,15 @@ The TURN relay (if used) sees encrypted packets and the two endpoints' addresses
 - Electron: `contextIsolation`, `sandbox`, no Node.js in the page, a minimal preload bridge, IPC accepted only from the app's own origin, navigation and new windows blocked, permissions granted only to the app origin, strict Content Security Policy.
 - All data-channel messages are schema-validated; key names injected on the host are allow-listed; file names are sanitised (no paths, no reserved names) and written as `.part` until complete; received sizes are bounded by the announced size.
 - Device names are stripped of control and bidirectional-override characters to prevent spoofed prompts.
+- Dialogs never auto-focus a button, so a stray Enter cannot accept an incoming connection.
+- On the desktop, the viewer keeps the clipboard in sync only while its window is focused.
+- If a server already knows a device's ID with a different key, the app generates a new identity instead of failing.
 - A visible "someone is connected" bar (excluded from screen capture on Windows/macOS) and tray status show active sessions; ending is always one click away.
 - Secrets in the browser version live in `localStorage` of your BeamDesk origin, protected by a strict CSP.
 
 ## Limitations
 
-- **The first connection to a device without a password trusts the server for the ID→key mapping.** Hosts sign the handshake and viewers pin keys, so a server cannot impersonate a device you have connected to before. For the *first* connection, an attacker controlling the server could try to substitute a device whose key hashes to the same 9-digit ID; with 30 bits that costs about 2³⁰ key generations per targeted ID. Using the one-time password (CPace) or comparing the **security code** (shown on both sides) removes this risk.
+- **A first connection by typed ID (no password, no link) trusts the server for the ID→key mapping.** Hosts sign the handshake and viewers pin keys, so a server cannot impersonate a device you have connected to before. For the *first* connection typed by hand, an attacker controlling the server could try to substitute a device whose key hashes to the same 9-digit ID; with 30 bits that costs about 2³⁰ key generations per targeted ID. Invite and help links (128-bit key hash), the one-time password (CPace) or comparing the **security code** (shown on both sides) remove this risk.
 - The security code is derived from the DTLS fingerprints (8 digits). It defeats a real-time interception unless the attacker can find a matching fingerprint pair within the connection setup time.
 - Browser hosts are view-only and cannot exclude the reminder bar from capture.
 - Linux Wayland sessions can be shared but not remotely controlled (X11 input injection).

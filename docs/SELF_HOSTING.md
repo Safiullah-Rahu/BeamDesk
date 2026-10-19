@@ -125,7 +125,7 @@ All settings are environment variables.
 | `DATA_DIR` | `./data` | Where the device registry (`devices.json`) is stored |
 | `WEB_ROOT` | auto | Folder with the built web app; empty string disables it |
 | `ACCESS_KEY` | — | If set, apps must enter this key to use the server ([private servers](#private-servers)) |
-| `TRUST_PROXY` | `false` | Use `X-Forwarded-For` for client IPs (set `true` behind a reverse proxy) |
+| `TRUST_PROXY` | `false` | Use the last `X-Forwarded-For` entry (added by your reverse proxy) as the client IP — set `true` behind exactly one proxy |
 | `STUN_URLS` | Google + Cloudflare STUN | Comma-separated STUN URLs |
 | `TURN_URLS` | — | Comma-separated TURN URLs, e.g. `turn:desk.example.com:3478?transport=udp,turn:desk.example.com:3478?transport=tcp` |
 | `TURN_SECRET` | — | coturn `static-auth-secret`: the server issues time-limited credentials (recommended) |
@@ -134,6 +134,7 @@ All settings are environment variables.
 | `ICE_SERVERS_JSON` | — | Full override: a JSON array of `RTCIceServer` objects |
 | `MAX_CLIENTS` | `20000` | Maximum simultaneous devices |
 | `MAX_CONNECTIONS_PER_IP` | `50` | Connections allowed from one IP address |
+| `NEW_DEVICES_PER_HOUR` | `60` | New device IDs one IP address may register per hour (bursts up to twice that); `0` = unlimited |
 | `DOWNLOAD_URL` | GitHub releases | Where "Install the desktop app" links point |
 
 Endpoints: `/` web app · `/ws` WebSocket · `/healthz` health check · `/api/info` server name, version, TURN availability.

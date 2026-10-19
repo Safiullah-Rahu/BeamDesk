@@ -93,3 +93,29 @@ test('security code is deterministic and formatted', () => {
   assert.match(securityCode('x'), /^\d{4} \d{4}$/);
   assert.ok(utf8('x').length === 1);
 });
+
+test('key hashes are 128-bit, stable and distinct', async () => {
+  const { keyHash, isKeyHash } = await import('../src/identity.ts');
+  const a = Identity.generate();
+  assert.ok(isKeyHash(keyHash(a.publicKeyB64)));
+  assert.equal(keyHash(a.publicKeyB64), keyHash(a.publicKeyB64));
+  assert.notEqual(keyHash(a.publicKeyB64), keyHash(Identity.generate().publicKeyB64));
+  assert.ok(!isKeyHash('short'));
+});
+
+test('acceptance signatures bind session, channel, viewer, slot and permissions', async () => {
+  const { acceptTranscript } = await import('../src/protocol.ts');
+  const host = Identity.generate();
+  const perms = { control: true, clipboard: false, files: true, audio: false };
+  const msg = acceptTranscript('sid', 'ci', '123456789', 'otp', perms);
+  const sig = host.sign(utf8(msg));
+  assert.ok(verifySignature(host.publicKeyB64, utf8(msg), sig));
+  for (const tampered of [
+    acceptTranscript('sid', 'ci', '123456789', 'otp', { ...perms, clipboard: true }),
+    acceptTranscript('sid', 'ci2', '123456789', 'otp', perms),
+    acceptTranscript('sid', 'ci', '987654321', 'otp', perms),
+    acceptTranscript('sid', 'ci', '123456789', null, perms),
+  ]) {
+    assert.ok(!verifySignature(host.publicKeyB64, utf8(tampered), sig));
+  }
+});

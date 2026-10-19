@@ -88,3 +88,26 @@ test('files: receiver without permission rejects and the sender stops', async ()
   assert.match(sender.list()[0].error ?? '', /not allowed/);
   assert.equal(receiver.list()[0].state, 'failed');
 });
+
+test('files: a sink that opens after the transfer was cancelled is released', async () => {
+  const [a, b] = FakeChannel.pair();
+  let aborted = 0;
+  let release!: () => void;
+  const opened = new Promise<void>((r) => (release = r));
+  const sender = new FileTransfers(() => null, () => false);
+  const receiver = new FileTransfers(
+    async () => {
+      await opened; // e.g. the desktop disk sink waiting for IPC
+      return { write: () => undefined, close: () => undefined, abort: () => void aborted++ };
+    },
+    () => true,
+  );
+  sender.attach(a as unknown as RTCDataChannel);
+  receiver.attach(b as unknown as RTCDataChannel);
+  sender.send([new File([new Uint8Array(1000)], 'x.bin')]);
+  await waitFor(() => receiver.list().length === 1);
+  receiver.cancel(receiver.list()[0].id);
+  release();
+  await waitFor(() => aborted === 1);
+  assert.equal(receiver.list()[0].state, 'cancelled');
+});

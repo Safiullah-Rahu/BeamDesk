@@ -10,6 +10,8 @@ import {
   generateOneTimePassword,
   HostService,
   Identity,
+  isKeyHash,
+  keyHash,
   normalizeServerUrl,
   parseId,
   randomId,
@@ -53,6 +55,8 @@ export interface Invite {
 
 export interface HelpRequest {
   helperId: string;
+  /** Key hash from the help link: only that exact device is let in. */
+  helperKey: string;
   helperName: string;
   status: 'idle' | 'starting' | 'waiting' | 'sharing' | 'error';
   error?: string;
@@ -273,6 +277,9 @@ function startSignaling(): void {
   if (!urls) return;
   const s = settings.value;
   signaling = new SignalingClient({ url: urls.ws, identity, name: s.deviceName, platform: platform.os, accessKey: s.accessKey });
+  signaling.on('error', (e) => {
+    if (e.code === 'id-conflict') void regenerateIdentity();
+  });
   signaling.on('state', (st) => {
     serverState.value = st;
     if (st === 'online') {
@@ -334,6 +341,27 @@ function startSignaling(): void {
   signaling.start();
 }
 
+let regenerations = 0;
+
+/** The server already knows our ID with another key (a collision or a squatter): get a new one. */
+async function regenerateIdentity(): Promise<void> {
+  if (regenerations++ >= 3) return;
+  const old = myId.value;
+  identity = Identity.generate();
+  stored.setSecret('identity', JSON.stringify(identity.toStored()));
+  myId.value = identity.id;
+  myPublicKey.value = identity.publicKeyB64;
+  // Password secrets are bound to the device ID.
+  if (permSecret) {
+    await setPermanentPassword(null);
+    updateSettings({ unattended: false });
+    toast('Please set your permanent password again (Settings → Security).', 'warn', undefined, 12_000);
+  }
+  if (settings.value.oneTimePassword) await rotateOtp();
+  restartSignaling();
+  toast(`ID ${formatId(old)} is already used by another device on this server, so this device got a new ID: ${formatId(identity.id)}.`, 'warn', undefined, 12_000);
+}
+
 export function reclaimConnection(): void {
   signaling?.reclaim();
 }
@@ -378,6 +406,7 @@ export interface ConnectOptions {
   remember?: boolean;
   acceptNewKey?: boolean;
   viewOnly?: boolean;
+  expectedKeyHash?: string;
 }
 
 export function connect(rawId: string, opts: ConnectOptions = {}): string | null {
@@ -416,6 +445,7 @@ export function connect(rawId: string, opts: ConnectOptions = {}): string | null
     quality: s.quality,
     pinnedKey: contact?.pk,
     acceptNewKey: opts.acceptNewKey,
+    expectedKeyHash: opts.expectedKeyHash,
     swapCmdCtrl: s.swapCmdCtrl,
     fileSink: platform.viewerFileSink,
   });
@@ -464,18 +494,23 @@ export function dismissInvite(from: string): void {
 
 // ------------------------------------------------------------------ links
 
+// Links carry a 128-bit hash of this device's key, so whoever opens one connects to exactly this
+// device, even on a first connection through an untrusted server.
 export function inviteLink(includePassword: boolean): string {
   const base = serverUrls.value?.http ?? '';
   const pw = includePassword && settings.value.oneTimePassword && otp.value ? `&p=${encodeURIComponent(otp.value)}` : '';
-  return `${base}/#c=${myId.value}${pw}`;
+  return `${base}/#c=${myId.value}${pw}&k=${keyHash(myPublicKey.value)}`;
 }
 
 export function helpLink(): string {
   const base = serverUrls.value?.http ?? '';
-  return `${base}/#help=${myId.value}&n=${encodeURIComponent(settings.value.deviceName)}`;
+  return `${base}/#help=${myId.value}&n=${encodeURIComponent(settings.value.deviceName)}&k=${keyHash(myPublicKey.value)}`;
 }
 
-type Link = { type: 'connect'; id: string; password?: string } | { type: 'help'; id: string; name?: string };
+export type Link = { type: 'connect'; id: string; password?: string; key?: string } | { type: 'help'; id: string; name?: string; key?: string };
+
+/** A connect link waiting for the user's confirmation (links never connect on their own). */
+export const pendingLink = signal<Extract<Link, { type: 'connect' }> | null>(null);
 
 export function parseLink(raw: string): Link | null {
   let params: URLSearchParams;
@@ -493,35 +528,48 @@ export function parseLink(raw: string): Link | null {
     return null;
   }
   const seg = path.split('/').filter(Boolean);
+  const k = params.get('k');
+  const key = isKeyHash(k) ? k : undefined;
   const connectId = parseId(params.get('c') ?? (seg[0] === 'connect' ? seg[1] ?? '' : ''));
-  if (connectId) return { type: 'connect', id: connectId, password: params.get('p') ?? undefined };
+  if (connectId) return { type: 'connect', id: connectId, password: params.get('p')?.slice(0, 128) ?? undefined, key };
   const helpId = parseId(params.get('help') ?? (seg[0] === 'help' ? seg[1] ?? '' : ''));
-  if (helpId) return { type: 'help', id: helpId, name: params.get('n')?.slice(0, 64) ?? undefined };
+  if (helpId) return { type: 'help', id: helpId, name: params.get('n')?.slice(0, 64) ?? undefined, key };
   return null;
 }
 
 export async function handleLink(raw: string): Promise<void> {
   const link = parseLink(raw);
   if (!link) return;
+  platform.attention();
   if (link.type === 'connect') {
-    if (signaling && signaling.state !== 'online') await signaling.waitOnline(10_000).catch(() => undefined);
-    connect(link.id, { password: link.password });
+    // Any web page can open a link: always let the user confirm before dialling.
+    if (link.id !== myId.value) pendingLink.value = link;
   } else if (link.id !== myId.value) {
-    help.value = { helperId: link.id, helperName: link.name || formatId(link.id), status: 'idle' };
+    help.value = link.key
+      ? { helperId: link.id, helperKey: link.key, helperName: link.name || formatId(link.id), status: 'idle' }
+      : { helperId: link.id, helperKey: '', helperName: link.name || formatId(link.id), status: 'error', error: 'This help link is incomplete. Ask your helper to send it again.' };
   }
+}
+
+export async function confirmPendingLink(ok: boolean): Promise<void> {
+  const link = pendingLink.value;
+  pendingLink.value = null;
+  if (!ok || !link) return;
+  if (signaling && signaling.state !== 'online') await signaling.waitOnline(10_000).catch(() => undefined);
+  connect(link.id, { password: link.password, expectedKeyHash: link.key });
 }
 
 /** The person who needs help shares their screen with the helper from a help link. */
 export async function startHelpSession(perms: Permissions): Promise<void> {
   const h = help.value;
-  if (!h || !signaling || !host) return;
+  if (!h || !h.helperKey || !signaling || !host) return;
   help.value = { ...h, status: 'starting' };
   try {
     await platform.host.prepareCapture?.(() => void setSharing(false));
     if (signaling.state !== 'online') await signaling.waitOnline(10_000);
     sharing.value = true;
     syncHostSettings();
-    host.preapprove(h.helperId, perms);
+    host.preapprove(h.helperId, h.helperKey, perms);
     const ok = signaling.send(h.helperId, randomId(), 'invite', { name: settings.value.deviceName, platform: platform.os });
     help.value = { ...h, status: ok ? 'waiting' : 'error', error: ok ? undefined : 'Not connected to the server.' };
   } catch (err) {

@@ -50,6 +50,8 @@ type Msg =
   | { t: 'reject'; id: number; reason?: string };
 
 const HIGH_WATER = 8 * 1024 * 1024;
+/** Received bytes not yet written to the sink before a transfer is aborted. */
+const MAX_UNWRITTEN = 64 * 1024 * 1024;
 const LOW_WATER = 1 * 1024 * 1024;
 const MAX_NAME = 255;
 
@@ -72,7 +74,7 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
   private transfers = new Map<number, Transfer>();
   private outgoing: { transfer: Transfer; file: Blob }[] = [];
   private sending = false;
-  private incoming = new Map<number, { transfer: Transfer; sink: FileSink | null; chain: Promise<void> }>();
+  private incoming = new Map<number, { transfer: Transfer; sink: FileSink | null; chain: Promise<void>; pending: number }>();
   private cancelled = new Set<number>();
   private updateTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -131,6 +133,11 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     }
     this.sendJson({ t: 'cancel', id });
     this.changed(true);
+  }
+
+  /** Cancels everything in flight (e.g. when file permission is revoked). */
+  cancelAll(): void {
+    for (const t of this.list()) if (t.state === 'active' || t.state === 'queued') this.cancel(t.id);
   }
 
   clearFinished(): void {
@@ -240,8 +247,17 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
       this.failIncoming(id, 'Received more data than announced');
       return;
     }
+    // A sender that ignores back-pressure must not make us buffer unbounded data in memory.
+    inc.pending += chunk.length;
+    if (inc.pending > MAX_UNWRITTEN) {
+      this.failIncoming(id, 'The file arrived faster than it could be saved');
+      return;
+    }
     // Evaluate the sink lazily: the first chunks can arrive before the sink is open.
-    inc.chain = inc.chain.then(() => inc.sink?.write(chunk)).catch((err) => this.failIncoming(id, (err as Error).message));
+    inc.chain = inc.chain
+      .then(() => inc.sink?.write(chunk))
+      .then(() => void (inc.pending -= chunk.length))
+      .catch((err) => this.failIncoming(id, (err as Error).message));
     const now = Date.now();
     const t = inc.transfer;
     const elapsed = (now - t.startedAt) / 1000;
@@ -264,7 +280,7 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
     // Register synchronously so that chunks arriving while the sink opens are queued.
     let resolveSink!: (s: FileSink | null) => void;
     const sinkReady = new Promise<FileSink | null>((r) => (resolveSink = r));
-    const entry = { transfer, sink: null as FileSink | null, chain: sinkReady.then(() => undefined) };
+    const entry = { transfer, sink: null as FileSink | null, chain: sinkReady.then(() => undefined), pending: 0 };
     this.incoming.set(m.id, entry);
     this.transfers.set(m.id, transfer);
     this.changed(true);
@@ -273,6 +289,12 @@ export class FileTransfers extends Emitter<{ update: Transfer[]; received: Trans
       sink = this.allowReceive() ? await this.sinkFactory({ id: m.id, name: transfer.name, size: transfer.size, mime: String(m.mime || '') }) : null;
     } catch {
       sink = null;
+    }
+    if (this.incoming.get(m.id) !== entry) {
+      // Cancelled (or the session ended) while the sink was opening: release it.
+      sink?.abort();
+      resolveSink(null);
+      return;
     }
     entry.sink = sink;
     resolveSink(sink);

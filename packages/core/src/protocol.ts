@@ -141,7 +141,8 @@ export type AuthFailure =
   | 'unsupported';
 
 export type AuthResult =
-  | { ok: true; slot: 'otp' | 'perm' | null; tag?: string; perms: Permissions }
+  /** `sig`: host identity signature over acceptTranscript(), so nobody else can forge an acceptance. */
+  | { ok: true; slot: 'otp' | 'perm' | null; tag?: string; perms: Permissions; sig: string }
   | { ok: false; reason: AuthFailure };
 
 export interface InviteData {
@@ -153,6 +154,8 @@ export interface InviteData {
 
 export const hostTranscript = (sid: string, ci: string, viewerId: string) => `BeamDesk-host-v1|${sid}|${ci}|${viewerId}`;
 export const viewerTranscript = (sid: string, ci: string, hostId: string) => `BeamDesk-viewer-v1|${sid}|${ci}|${hostId}`;
+export const acceptTranscript = (sid: string, ci: string, viewerId: string, slot: string | null, p: Permissions) =>
+  `BeamDesk-accept-v1|${sid}|${ci}|${viewerId}|${slot ?? '-'}|${+!!p.control}${+!!p.clipboard}${+!!p.files}${+!!p.audio}`;
 
 // ---------------------------------------------------------------------------
 // 3. Data channels

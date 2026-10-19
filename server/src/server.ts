@@ -67,6 +67,8 @@ export function createBeamServer(config: Config): BeamServer {
   const registry = new DeviceRegistry(config.dataDir);
   const online = new Map<string, Client>();
   const perIp = new Map<string, number>();
+  /** New IDs per IP address: stops one network from squatting IDs or bloating the registry. */
+  const newIdsPerIp = new Map<string, { bucket: TokenBucket; seen: number }>();
   const turn = hasTurn(config);
   const serverInfo = { name: config.serverName, version: APP_VERSION, requiresKey: !!config.accessKey, turn };
 
@@ -182,6 +184,15 @@ export function createBeamServer(config: Config): BeamServer {
     if (!verifySignature(m.pk, registrationMessage(client.challenge), m.sig)) {
       return fail(client, 'bad-signature', 'signature check failed', true);
     }
+    if (config.newDevicesPerHour > 0 && !registry.has(id)) {
+      let entry = newIdsPerIp.get(client.ip);
+      if (!entry) {
+        entry = { bucket: new TokenBucket(config.newDevicesPerHour / 3600, config.newDevicesPerHour * 2), seen: 0 };
+        newIdsPerIp.set(client.ip, entry);
+      }
+      entry.seen = Date.now();
+      if (!entry.bucket.take()) return fail(client, 'rate-limited', 'Too many new devices from this network. Try again later.', true);
+    }
     if (!registry.claim(id, m.pk)) {
       return fail(client, 'id-conflict', 'This ID belongs to another device.', true);
     }
@@ -223,6 +234,8 @@ export function createBeamServer(config: Config): BeamServer {
 
   // Drop connections that stopped answering pings (sleeping laptops, dead NAT mappings).
   const heartbeat = setInterval(() => {
+    const now = Date.now();
+    for (const [ip, e] of newIdsPerIp) if (now - e.seen > 3 * 3600_000) newIdsPerIp.delete(ip);
     for (const c of online.values()) {
       if (!c.alive) {
         c.ws.terminate();
@@ -263,9 +276,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 
 function clientIp(req: http.IncomingMessage, trustProxy: boolean): string {
   if (trustProxy) {
+    // Use the right-most entry: the one appended by our (trusted) reverse proxy.
+    // Entries further left come from the client and can be forged.
     const fwd = req.headers['x-forwarded-for'];
-    const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
-    if (first) return first;
+    const raw = Array.isArray(fwd) ? fwd.join(',') : fwd;
+    const last = raw?.split(',').map((s) => s.trim()).filter(Boolean).pop();
+    if (last) return last;
   }
   return req.socket.remoteAddress ?? 'unknown';
 }

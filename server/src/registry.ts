@@ -38,6 +38,10 @@ export class DeviceRegistry {
     return true;
   }
 
+  has(id: string): boolean {
+    return this.entries.has(id);
+  }
+
   get size(): number {
     return this.entries.size;
   }

@@ -75,9 +75,12 @@ test('a wrong password is rejected', async ({ browser }) => {
 test('help link: the person shares, the helper joins', async ({ browser }) => {
   const helper = await device(browser);
   const person = await device(browser);
-  const helperId = ((await helper.getByTestId('my-id').locator('span').first().textContent()) ?? '').replace(/\s/g, '');
+  await helper.getByRole('button', { name: 'Copy help link' }).click();
+  const link = new URL(await helper.evaluate(() => navigator.clipboard.readText()));
+  link.hash = link.hash.replace(/n=[^&]*/, 'n=Support%20Desk');
+  expect(link.hash).toMatch(/k=[A-Za-z0-9_-]{22}/);
 
-  await person.goto(`/#help=${helperId}&n=Support%20Desk`);
+  await person.goto(`/${link.hash}`);
   await expect(person.getByText('Support Desk would like to help you')).toBeVisible();
   await person.getByTestId('share-for-help').click();
   await expect(person.getByText(/Waiting for Support Desk to join/)).toBeVisible();
@@ -87,6 +90,26 @@ test('help link: the person shares, the helper joins', async ({ browser }) => {
   await expect(person.getByText(/You are sharing your screen with/)).toBeVisible();
   await person.getByRole('dialog').getByRole('button', { name: 'Stop sharing' }).click();
   await expect(helper.getByText('Session ended')).toBeVisible();
+});
+
+test('invite links ask for confirmation, then connect to exactly that device', async ({ browser }) => {
+  const host = await device(browser);
+  const viewer = await device(browser);
+  await startSharing(host);
+  await host.getByRole('button', { name: 'Copy invite link' }).click();
+  const link = new URL(await host.evaluate(() => navigator.clipboard.readText()));
+  expect(link.hash).toMatch(/^#c=\d{9}&p=\w+&k=[A-Za-z0-9_-]{22}$/);
+
+  await viewer.goto(`/${link.hash}`);
+  await expect(viewer.getByText('Connect to this device?')).toBeVisible();
+  await viewer.getByTestId('confirm-link').click();
+  await expectVideo(viewer); // the link's one-time password skips the accept prompt
+
+  // A link whose key hash does not match the device is refused.
+  const other = await device(browser);
+  await other.goto(`/${link.hash.replace(/k=[^&]+/, 'k=AAAAAAAAAAAAAAAAAAAAAA')}`);
+  await other.getByTestId('confirm-link').click();
+  await expect(other.getByText('The identity of the other device could not be verified.')).toBeVisible();
 });
 
 test('offline IDs give a clear message', async ({ browser }) => {

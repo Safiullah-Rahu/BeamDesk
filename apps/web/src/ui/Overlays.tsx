@@ -2,7 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { CircleCheck, Info, LifeBuoy, MonitorUp, ScreenShare, ShieldAlert, TriangleAlert, X } from 'lucide-preact';
 import { formatId, type Permissions } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
-import { connect, dismissInvite, dismissToast, endHelp, help, hosted, invites, settingsOpen, startHelpSession, toasts } from '../state/app.ts';
+import { confirmPendingLink, connect, dismissInvite, dismissToast, endHelp, help, hosted, invites, pendingLink, settingsOpen, startHelpSession, toasts } from '../state/app.ts';
 import { Button, IconButton, Modal, Spinner, Switch } from './kit.tsx';
 import type { DesktopPermissions } from '../platform/types.ts';
 
@@ -102,13 +102,51 @@ export function HelpLanding() {
             <p>Click the button and choose what to share. {desktop ? '' : 'Nothing to install.'} Only continue if you know and trust this person.</p>
             {desktop && caps.control && <Switch label="Allow them to control my mouse and keyboard" checked={perms.control} onChange={(v) => setPerms({ ...perms, control: v })} />}
             {h.status === 'error' && <p class="warn-text">{h.error}</p>}
-            <Button variant="primary" size="lg" icon={h.status === 'starting' ? <Spinner /> : <ScreenShare size={20} />} disabled={h.status === 'starting'} onClick={() => void startHelpSession(perms)} data-testid="share-for-help">
-              Share my screen
-            </Button>
+            {h.helperKey && (
+              <Button variant="primary" size="lg" icon={h.status === 'starting' ? <Spinner /> : <ScreenShare size={20} />} disabled={h.status === 'starting'} onClick={() => void startHelpSession(perms)} data-testid="share-for-help">
+                Share my screen
+              </Button>
+            )}
             <p class="hint">
               <ShieldAlert size={14} /> Helper ID: {formatId(h.helperId)}
             </p>
           </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/** Links (invite links, beamdesk:// deep links) never connect without the user's confirmation. */
+export function LinkConfirm() {
+  const link = pendingLink.value;
+  if (!link) return null;
+  return (
+    <Modal
+      title="Connect to this device?"
+      onClose={() => void confirmPendingLink(false)}
+      footer={
+        <>
+          <span class="spacer" />
+          <Button onClick={() => void confirmPendingLink(false)}>Cancel</Button>
+          <Button variant="primary" onClick={() => void confirmPendingLink(true)} data-testid="confirm-link">
+            Connect
+          </Button>
+        </>
+      }
+    >
+      <div class="help-landing">
+        <span class="hero-icon">
+          <MonitorUp size={34} />
+        </span>
+        <h3>{formatId(link.id)}</h3>
+        <p>
+          A link asks BeamDesk to connect to this device{link.password ? ' using the password it contains' : ''}. Only continue if you were expecting it.
+        </p>
+        {link.key && (
+          <p class="hint">
+            <ShieldAlert size={14} /> The link pins the device's security key, so you can only reach that exact device.
+          </p>
         )}
       </div>
     </Modal>
