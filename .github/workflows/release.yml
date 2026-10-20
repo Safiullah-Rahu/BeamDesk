@@ -118,7 +118,7 @@ jobs:
             if [ "$RUNNER_OS" = "macOS" ]; then extra+=(-c.mac.identity=- -c.mac.hardenedRuntime=false); fi
           fi
           npx electron-builder --config electron-builder.yml ${{ matrix.args }} --publish never "${extra[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: BeamDesk-${{ matrix.name }}
           path: |
