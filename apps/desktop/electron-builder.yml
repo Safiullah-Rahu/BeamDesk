@@ -1,7 +1,7 @@
 # Packaging for Windows, macOS and Linux. Run from apps/desktop: npm run dist
 appId: io.github.safiullahrahu.beamdesk
 productName: BeamDesk
-copyright: Copyright © 2026 BeamDesk contributors
+copyright: Copyright © 2026 Neurosmith
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 
 directories:
@@ -89,7 +89,7 @@ linux:
   category: Network
   synopsis: Open-source, end-to-end encrypted remote desktop
   description: BeamDesk lets you help and access computers remotely with end-to-end encryption.
-  maintainer: BeamDesk contributors <safiullahrahu1555@gmail.com>
+  maintainer: Neurosmith <safiullahrahu1555@gmail.com>
   target:
     - AppImage
     - deb

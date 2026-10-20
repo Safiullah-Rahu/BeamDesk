@@ -32,6 +32,50 @@ export interface DesktopSessionBarState {
 
 export type SessionBarAction = { type: 'end' | 'end-all' | 'show'; sid?: string };
 
+/** Host mode settings (this computer runs the BeamDesk server). */
+export interface HostModeConfig {
+  enabled: boolean;
+  /** Ask the router to open the port (UPnP / NAT-PMP). */
+  portMapping: boolean;
+  /** Keep the computer from sleeping while hosting. */
+  keepAwake: boolean;
+  /** TCP and UDP port. */
+  port: number;
+  /** Optional DNS name (dynamic DNS) or fixed address that reaches this computer. */
+  publicHost: string;
+}
+
+export interface HostModeStatus {
+  state: 'running' | 'stopped';
+  port: number;
+  fingerprint: string;
+  lan: string | null;
+  tailscale: string | null;
+  internet: {
+    mapping: 'off' | 'pending' | 'upnp' | 'nat-pmp' | 'failed';
+    mappingError: string | null;
+    externalIp: string | null;
+    externalPort: number;
+    behindCgnat: boolean;
+    reachable: 'checking' | 'yes' | 'unknown';
+  };
+  publicHost: string | null;
+  /** The connection code to give to other devices. */
+  code: string;
+  browserUrls: string[];
+  devices: number;
+}
+
+export interface HostModeInfo {
+  config: HostModeConfig;
+  phase: 'off' | 'starting' | 'running' | 'error';
+  error: string | null;
+  /** This device's own connection while hosting. */
+  localUrl: string | null;
+  accessKey: string | null;
+  status: HostModeStatus | null;
+}
+
 export interface DesktopBridge {
   version: string;
   os: 'windows' | 'macos' | 'linux';
@@ -70,4 +114,24 @@ export interface DesktopBridge {
   notify(title: string, body: string): void;
   openExternal(url: string): void;
   quit(): void;
+  hostMode: {
+    get(): HostModeInfo;
+    set(patch: Partial<HostModeConfig>): Promise<HostModeInfo>;
+    /** New access key and certificate: every device has to join again. */
+    regenerate(): Promise<HostModeInfo>;
+    refresh(): void;
+    onChange(cb: (info: HostModeInfo) => void): () => void;
+  };
+  /** WebSockets to home servers, with the certificate pinned by the main process. */
+  pinnedSocket: {
+    open(url: string): Promise<number | null>;
+    send(id: number, data: string): void;
+    close(id: number, code?: number, reason?: string): void;
+    onEvent(cb: (e: PinnedSocketEvent) => void): () => void;
+  };
 }
+
+export type PinnedSocketEvent =
+  | { id: number; type: 'open' }
+  | { id: number; type: 'message'; data: string }
+  | { id: number; type: 'close'; code: number; reason: string };

@@ -25,7 +25,8 @@ flowchart TB
 | `packages/core` | Platform-neutral TypeScript: wire protocol, identity, CPace, SDP helpers, signaling client, `ViewerSession`, `HostService`/`HostSession`, file transfer, key mapping, stats. Runs in browsers, Electron and Node (tests). |
 | `server` | `ws`-based signaling server. Bundled with esbuild into one `server.mjs`. Also serves the built web app from memory with precompressed brotli/gzip and strict security headers. |
 | `apps/web` | The user interface (Preact + @preact/signals). A platform layer (`src/platform`) abstracts browser vs desktop. |
-| `apps/desktop` | Electron main process + sandboxed preload. Loads the web UI from a privileged `app://beamdesk` origin. |
+| `apps/desktop` | Electron main process + sandboxed preload. Loads the web UI from a privileged `app://beamdesk` origin. In host mode it runs the server (`server/src/hostmode.ts`) in the main process and opens pinned WebSockets to home servers for the UI (`src/pinnedsocket.ts`). |
+| `server/src/hostmode.ts` | Host mode: the signaling server over TLS 1.3 with a self-signed certificate (`cert.ts`), the built-in STUN/TURN relay (`turn.ts`), router port mapping (`portmap.ts`, UPnP IGD + NAT-PMP), address discovery (`netinfo.ts`) and the connection code (`packages/core/src/joincode.ts`). |
 
 ## Signaling protocol
 

@@ -2000,3 +2000,178 @@ video.remote.controllable {
 .modal:focus {
   outline: none;
 }
+
+/* Settings → Network ------------------------------------------------------ */
+.panel {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin: 14px 0 6px;
+  background: var(--bg-elev);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.panel-head svg {
+  color: var(--accent);
+}
+
+.tag-inuse {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+
+.code-box {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--bg-soft);
+  border-radius: var(--radius-sm);
+  padding: 10px 8px 10px 12px;
+}
+
+.code-box code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.code-input {
+  font-family: var(--mono);
+  font-size: 13px;
+  resize: vertical;
+  min-height: 64px;
+}
+
+.input.narrow {
+  width: 110px;
+}
+
+.net-checks {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.net-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.net-check > svg,
+.net-check > .spinner {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.net-check.ok > svg {
+  color: var(--ok);
+}
+
+.net-check.bad > svg {
+  color: var(--err);
+}
+
+.net-check.off > svg {
+  color: var(--text-faint);
+}
+
+.net-check code,
+.addr-list code,
+.hint code {
+  overflow-wrap: anywhere;
+}
+
+.home-server {
+  background: var(--bg-soft);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+
+.addr-list {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+  font-size: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.home-server .inline-row {
+  margin-top: 10px;
+}
+
+.notice.notice-err {
+  background: var(--err-soft);
+}
+
+.notice.notice-err > svg {
+  color: var(--err);
+}
+
+.panel .notice {
+  margin: 10px 0;
+}
+
+details.advanced,
+.guides details {
+  margin-top: 12px;
+}
+
+details.advanced > summary,
+.guides summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 6px 0;
+}
+
+.guides details {
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding-bottom: 6px;
+}
+
+.guides ol {
+  margin: 6px 0 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.link.ext {
+  display: inline;
+}
+
+.link.ext svg {
+  vertical-align: -2px;
+}
+
+.pill.host {
+  cursor: pointer;
+  border: 0;
+  font: inherit;
+}

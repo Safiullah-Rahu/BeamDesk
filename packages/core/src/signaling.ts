@@ -17,11 +17,14 @@ export interface IncomingSignal {
 }
 
 export interface SignalingOptions {
-  url: string;
+  /** One server address, or several ways to reach the same server (tried at once, first answer wins). */
+  url: string | string[];
   identity: Identity;
   name: string;
   platform: Platform;
   accessKey?: string;
+  /** Opens the socket (default: the global WebSocket). Node tests use it for pinned TLS. */
+  createWebSocket?: (url: string) => WebSocket;
 }
 
 type Events = {
@@ -40,6 +43,9 @@ export class SignalingClient extends Emitter<Events> {
   lastError: { code: string; message: string } | null = null;
 
   private ws: WebSocket | null = null;
+  /** Sockets still racing to be the connection (several addresses for one server). */
+  private candidates: WebSocket[] = [];
+  private activeUrl = '';
   private opts: SignalingOptions;
   private stopped = true;
   private attempt = 0;
@@ -59,8 +65,13 @@ export class SignalingClient extends Emitter<Events> {
     return this.opts.identity.id;
   }
 
+  /** The address in use (the first one while not connected). */
   get url(): string {
-    return this.opts.url;
+    return this.activeUrl || this.urls[0] || '';
+  }
+
+  private get urls(): string[] {
+    return (Array.isArray(this.opts.url) ? this.opts.url : [this.opts.url]).filter(Boolean);
   }
 
   start(): void {
@@ -76,6 +87,7 @@ export class SignalingClient extends Emitter<Events> {
     this.clearTimers();
     this.cleanupGlobal?.();
     this.cleanupGlobal = null;
+    this.closeCandidates();
     const ws = this.ws;
     this.ws = null;
     if (ws) {
@@ -178,29 +190,90 @@ export class SignalingClient extends Emitter<Events> {
 
   private open(): void {
     this.clearTimers();
+    this.closeCandidates();
     this.setState('connecting');
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(this.opts.url);
-    } catch (err) {
-      this.lastError = { code: 'bad-url', message: `Invalid server address: ${(err as Error).message}` };
+    const urls = this.urls;
+    const sockets: WebSocket[] = [];
+    let lastError = '';
+    for (const url of urls) {
+      try {
+        sockets.push(this.connectTo(url, sockets));
+      } catch (err) {
+        lastError = (err as Error).message;
+      }
+    }
+    if (!sockets.length) {
+      this.lastError = { code: 'bad-url', message: `Invalid server address: ${lastError || 'none set'}` };
       this.setState('error');
       return;
     }
-    this.ws = ws;
-    ws.onmessage = (e) => this.onMessage(e.data);
+    this.candidates = sockets;
+  }
+
+  private connectTo(url: string, race: WebSocket[]): WebSocket {
+    const ws = this.opts.createWebSocket ? this.opts.createWebSocket(url) : new WebSocket(url);
+    ws.onmessage = (e) => {
+      if (this.ws !== ws) {
+        if (this.ws || this.candidates !== race) {
+          ws.onclose = null;
+          ws.close();
+          return;
+        }
+        // The first address that answers becomes the connection; the others are dropped.
+        this.ws = ws;
+        this.activeUrl = url;
+        this.candidates = [];
+        for (const other of race) {
+          if (other === ws) continue;
+          other.onclose = null;
+          other.onmessage = null;
+          try {
+            other.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      this.onMessage(e.data);
+    };
     ws.onclose = () => {
-      if (this.ws !== ws) return;
-      this.ws = null;
-      this.clearTimers();
-      this.failPending();
-      if (this.stopped || this.state === 'replaced' || this.state === 'error') return;
-      this.setState('offline');
-      this.scheduleReconnect();
+      if (this.ws === ws) {
+        this.ws = null;
+        this.clearTimers();
+        this.failPending();
+        if (this.stopped || this.state === 'replaced' || this.state === 'error') return;
+        this.setState('offline');
+        this.scheduleReconnect();
+        return;
+      }
+      if (this.candidates !== race) return;
+      race.splice(race.indexOf(ws), 1);
+      if (!race.length) {
+        // No address answered.
+        this.candidates = [];
+        if (this.stopped) return;
+        this.setState('offline');
+        this.scheduleReconnect();
+      }
     };
     ws.onerror = () => {
       /* onclose follows */
     };
+    return ws;
+  }
+
+  private closeCandidates(): void {
+    const list = this.candidates;
+    this.candidates = [];
+    for (const ws of list) {
+      ws.onclose = null;
+      ws.onmessage = null;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private scheduleReconnect(): void {
@@ -292,7 +365,7 @@ export class SignalingClient extends Emitter<Events> {
       if (this.state === 'offline' || this.state === 'connecting') {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.attempt = 0;
-        if (!this.ws) this.open();
+        if (!this.ws && !this.candidates.length) this.open();
       } else if (this.state === 'online') {
         this.heartbeat();
       }

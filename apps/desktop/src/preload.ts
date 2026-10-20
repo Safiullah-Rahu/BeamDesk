@@ -51,6 +51,19 @@ const bridge: DesktopBridge = {
   notify: (title, body) => ipcRenderer.send('notify', title, body),
   openExternal: (url) => ipcRenderer.send('open-external', url),
   quit: () => ipcRenderer.send('quit'),
+  hostMode: {
+    get: () => ipcRenderer.sendSync('hostmode:get'),
+    set: (patch) => ipcRenderer.invoke('hostmode:set', patch),
+    regenerate: () => ipcRenderer.invoke('hostmode:regenerate'),
+    refresh: () => ipcRenderer.send('hostmode:refresh'),
+    onChange: (cb) => listen('hostmode:state', cb),
+  },
+  pinnedSocket: {
+    open: (url) => ipcRenderer.invoke('pws:open', url),
+    send: (id, data) => ipcRenderer.send('pws:send', id, data),
+    close: (id, code, reason) => ipcRenderer.send('pws:close', id, code, reason),
+    onEvent: (cb) => listen('pws:event', cb),
+  },
 };
 
 contextBridge.exposeInMainWorld('beamdesk', bridge);

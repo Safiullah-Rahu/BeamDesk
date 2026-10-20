@@ -1,8 +1,76 @@
 /** Desktop (Electron) implementation, backed by the preload bridge `window.beamdesk`. */
-import type { DesktopBridge, DisplayInfo, FileSinkFactory } from '@beamdesk/core';
+import type { DesktopBridge, DisplayInfo, FileSinkFactory, PinnedSocketEvent } from '@beamdesk/core';
 import type { AppPlatform } from './types.ts';
 
 declare const __DEFAULT_SERVER__: string;
+
+/**
+ * A WebSocket look-alike for home servers: the main process holds the real socket and checks the
+ * server's certificate against the connection code.
+ */
+function pinnedSocketFactory(bridge: DesktopBridge): (url: string) => WebSocket {
+  const live = new Map<number, PinnedSocket>();
+  /** Events that arrive before open() has told us the socket's id. */
+  const early = new Map<number, PinnedSocketEvent[]>();
+  bridge.pinnedSocket.onEvent((e) => {
+    const s = live.get(e.id);
+    if (s) s.handle(e);
+    else if (early.size < 64) early.set(e.id, [...(early.get(e.id) ?? []), e]);
+  });
+
+  class PinnedSocket {
+    readyState: number = WebSocket.CONNECTING;
+    readonly url: string;
+    onopen: ((e: unknown) => void) | null = null;
+    onmessage: ((e: { data: string }) => void) | null = null;
+    onclose: ((e: { code: number; reason: string }) => void) | null = null;
+    onerror: ((e: unknown) => void) | null = null;
+    private id: number | null = null;
+
+    constructor(url: string) {
+      this.url = url;
+      void bridge.pinnedSocket.open(url).then(
+        (id) => {
+          if (id === null) return this.finish(1006, 'not allowed');
+          if (this.readyState >= WebSocket.CLOSING) return bridge.pinnedSocket.close(id);
+          this.id = id;
+          live.set(id, this);
+          for (const e of early.get(id) ?? []) this.handle(e);
+          early.delete(id);
+        },
+        () => this.finish(1006, 'not allowed'),
+      );
+    }
+
+    handle(e: PinnedSocketEvent): void {
+      if (e.type === 'open' && this.readyState === WebSocket.CONNECTING) {
+        this.readyState = WebSocket.OPEN;
+        this.onopen?.({});
+      } else if (e.type === 'message' && this.readyState === WebSocket.OPEN) this.onmessage?.({ data: e.data });
+      else if (e.type === 'close') this.finish(e.code, e.reason);
+    }
+
+    send(data: string): void {
+      if (this.readyState === WebSocket.OPEN && this.id !== null) bridge.pinnedSocket.send(this.id, data);
+    }
+
+    close(code?: number, reason?: string): void {
+      if (this.readyState >= WebSocket.CLOSING) return;
+      this.readyState = WebSocket.CLOSING;
+      if (this.id !== null) bridge.pinnedSocket.close(this.id, code, reason);
+      else this.finish(code ?? 1000, reason ?? '');
+    }
+
+    private finish(code: number, reason: string): void {
+      if (this.readyState === WebSocket.CLOSED) return;
+      this.readyState = WebSocket.CLOSED;
+      if (this.id !== null) live.delete(this.id);
+      this.onerror?.({});
+      this.onclose?.({ code, reason });
+    }
+  }
+  return (url) => new PinnedSocket(url) as unknown as WebSocket;
+}
 
 export function createDesktopPlatform(bridge: DesktopBridge): AppPlatform {
   const persisted = bridge.store.load();
@@ -116,6 +184,8 @@ export function createDesktopPlatform(bridge: DesktopBridge): AppPlatform {
       inputAvailable: () => inputOk,
       secureStorage: bridge.secureStorage !== false,
       quit: () => bridge.quit(),
+      hostMode: bridge.hostMode,
+      pinnedSocket: pinnedSocketFactory(bridge),
     },
   };
 }

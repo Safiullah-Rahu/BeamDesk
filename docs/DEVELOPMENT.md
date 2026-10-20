@@ -34,12 +34,15 @@ BEAMDESK_E2E_DESKTOP=1 xvfb-run -a -s "-screen 0 1280x800x24" npx playwright tes
 
 It launches the Electron app as host on a virtual display, connects a browser viewer with the one-time password, moves the remote mouse (and checks the real cursor position), syncs the clipboard, transfers a file and verifies password rotation.
 
+`hostmode.spec.ts` (same command, same variable) covers host mode with two desktop apps and a browser: the code is rejected with a forged certificate fingerprint and accepted with the real one, a session forced through the relay uses the built-in TURN server, the browser link connects, and host mode comes back on by itself after the app restarts.
+
 ## Code map
 
 - `packages/core/src/viewer.ts` — the viewer state machine.
 - `packages/core/src/host.ts` — incoming request handling, decisions, capture, input forwarding.
 - `packages/core/src/cpace.ts`, `identity.ts` — cryptography (with tests in `packages/core/test`).
 - `server/src/server.ts` — signaling server.
+- `server/src/hostmode.ts` — host mode (with `turn.ts`, `portmap.ts`, `netinfo.ts`, `cert.ts`); `apps/desktop/src/hostserver.ts` runs it in the app, `pinnedsocket.ts` connects to home servers.
 - `apps/web/src/state/app.ts` — application state, links, address book, trust store.
 - `apps/web/src/ui/Viewer.tsx` — remote screen, input capture, toolbar.
 - `apps/desktop/src/main.ts` — Electron main process; `input.ts` input injection; `preload.ts` the bridge.
@@ -63,6 +66,8 @@ dbus-run-session -- sh -c 'echo | gnome-keyring-daemon --unlock --components=sec
 ```
 
 `gnome-keyring` and `xvfb` must be installed; the keyring lets the desktop app store its secrets as on a normal Linux desktop.
+
+The host mode images need a home network with a router, so they are made in a private network namespace with a fake UPnP router: `e2e/netns-screenshots.sh` (also needs `unshare` and `iproute2`).
 
 ## Releasing
 

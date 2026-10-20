@@ -143,6 +143,7 @@ test('http endpoints', async () => {
   assert.equal(info.requiresKey, false);
   const res = await fetch(`${base}/api/info`);
   assert.equal(res.headers.get('x-frame-options'), 'DENY');
+  assert.equal(res.headers.get('access-control-allow-origin'), '*', 'the desktop app (another origin) can read it');
 });
 
 test('access key protects private servers', async () => {

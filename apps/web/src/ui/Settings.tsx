@@ -6,10 +6,10 @@ import {
   blocked,
   hasPermanentPassword,
   myPublicKey,
-  serverUrls,
   setPermanentPassword,
   settings,
   settingsOpen,
+  settingsSection,
   toast,
   trusted,
   unblock,
@@ -18,6 +18,7 @@ import {
 } from '../state/app.ts';
 import type { Settings as S } from '../state/settings.ts';
 import { Button, IconButton, Modal, Segmented, Switch } from './kit.tsx';
+import { NetworkSection } from './NetworkSettings.tsx';
 
 declare const __DOWNLOAD_URL__: string;
 const REPO = 'https://github.com/Safiullah-Rahu/BeamDesk';
@@ -25,7 +26,8 @@ const REPO = 'https://github.com/Safiullah-Rahu/BeamDesk';
 type Section = 'general' | 'security' | 'network' | 'video' | 'about';
 
 export function SettingsModal() {
-  const [section, setSection] = useState<Section>('general');
+  const section = settingsSection.value;
+  const setSection = (v: Section) => (settingsSection.value = v);
   if (!settingsOpen.value) return null;
   const nav: { id: Section; label: string; icon: any }[] = [
     { id: 'general', label: 'General', icon: Cog },
@@ -261,56 +263,6 @@ function Security() {
       <p class="hint">
         This device’s security key: <code>{keyFingerprint(myPublicKey.value)}</code>
       </p>
-    </>
-  );
-}
-
-function NetworkSection() {
-  const s = settings.value;
-  const [url, setUrl] = useState(s.serverUrl);
-  const [key, setKey] = useState(s.accessKey);
-  const [info, setInfo] = useState<{ name: string; version: string; turn: boolean; requiresKey: boolean } | null | 'error'>(null);
-  const base = serverUrls.value?.http;
-  useEffect(() => {
-    if (!base) return;
-    let alive = true;
-    fetch(`${base}/api/info`)
-      .then((r) => r.json())
-      .then((j) => alive && setInfo(j))
-      .catch(() => alive && setInfo('error'));
-    return () => {
-      alive = false;
-    };
-  }, [base]);
-  return (
-    <>
-      <h3>Server</h3>
-      <label class="field">
-        <span class="field-label">Server address</span>
-        <input class="input" placeholder={platform.defaultServer || 'desk.example.com'} value={url} onInput={(e) => setUrl(e.currentTarget.value)} spellcheck={false} />
-        <span class="hint">Leave empty to use {platform.defaultServer ? <code>{platform.defaultServer}</code> : 'the default server'}. Self-host your own in minutes — see the guide.</span>
-      </label>
-      <label class="field">
-        <span class="field-label">Access key</span>
-        <input class="input" type="password" placeholder="Only for private servers" value={key} onInput={(e) => setKey(e.currentTarget.value)} />
-      </label>
-      <Button variant="primary" disabled={url === s.serverUrl && key === s.accessKey} onClick={() => updateSettings({ serverUrl: url.trim(), accessKey: key.trim() })}>
-        Save and reconnect
-      </Button>
-      {info && (
-        <p class="hint">
-          {info === 'error'
-            ? 'Could not reach the server.'
-            : `${info.name} ${info.version} · ${info.turn ? 'relay (TURN) available' : 'no relay configured — very strict networks may fail'}${info.requiresKey ? ' · private' : ''}`}
-        </p>
-      )}
-      <h3>Privacy</h3>
-      <Switch
-        label="Always relay connections (hide my IP address)"
-        hint="Routes traffic through the server's TURN relay so the other side never sees your IP. Slightly slower; requires a TURN server."
-        checked={s.forceRelay}
-        onChange={set('forceRelay')}
-      />
     </>
   );
 }

@@ -4,9 +4,11 @@ import { formatId, formatOneTimePassword } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
 import {
   hasPermanentPassword,
+  hostMode,
   hosted,
   inviteLink,
   myId,
+  openSettings,
   otp,
   reclaimConnection,
   retryServer,
@@ -15,7 +17,6 @@ import {
   serverState,
   setSharing,
   settings,
-  settingsOpen,
   sharing,
 } from '../state/app.ts';
 import { Button, CopyButton, copyText, IconButton, Spinner } from './kit.tsx';
@@ -24,6 +25,22 @@ declare const __DOWNLOAD_URL__: string;
 
 export function StatusPill() {
   const st = serverState.value;
+  const host = hostMode.value?.config.enabled ? hostMode.value : null;
+  if (host?.phase === 'starting') return <span class="pill"><Spinner size={12} />Starting your server…</span>;
+  if (host?.phase === 'error')
+    return (
+      <span class="pill err" title={host.error ?? ''}>
+        Your server is off <button class="link" onClick={() => openSettings('network')}>Details</button>
+      </span>
+    );
+  if (st === 'online' && host?.phase === 'running') {
+    const n = host.status?.devices ?? 0;
+    return (
+      <button type="button" class="pill ok host" title="This computer is the BeamDesk server" onClick={() => openSettings('network')} data-testid="hosting-pill">
+        <span class="dot" />Ready · hosting{n > 1 ? ` ${n} devices` : ''}
+      </button>
+    );
+  }
   if (st === 'online') return <span class="pill ok"><span class="dot" />Ready</span>;
   if (st === 'connecting') return <span class="pill"><Spinner size={12} />Connecting…</span>;
   if (st === 'replaced')
@@ -116,7 +133,7 @@ export function DeviceCard() {
       )}
       {!web && s.access === 'off' && (
         <p class="hint warn-text">
-          Incoming connections are turned off. <button class="link" onClick={() => (settingsOpen.value = true)}>Change in Settings</button>
+          Incoming connections are turned off. <button class="link" onClick={() => openSettings('security')}>Change in Settings</button>
         </p>
       )}
       {web && sharing.value && (

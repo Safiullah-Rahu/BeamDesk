@@ -13,7 +13,7 @@ import {
   hosted,
   invites,
   pendingLink,
-  settingsOpen,
+  openSettings,
   startHelpSession,
   toasts,
 } from '../state/app.ts';
@@ -256,7 +256,7 @@ export function NeedsServer() {
       <div class="notice">
         <TriangleAlert size={18} />
         <span>Choose the BeamDesk server you want to use. It is the meeting point that introduces devices — your screen never passes through it.</span>
-        <Button size="sm" variant="primary" onClick={() => (settingsOpen.value = true)}>
+        <Button size="sm" variant="primary" onClick={() => openSettings('network')}>
           Set server
         </Button>
       </div>

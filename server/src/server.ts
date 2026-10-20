@@ -9,14 +9,16 @@
  *  - serve the web app.
  */
 import http from 'node:http';
+import https from 'node:https';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { deviceIdFromPublicKey, registrationMessage, verifySignature } from '@beamdesk/core/identity';
 import { APP_VERSION, LIMITS, type ServerToClient, type SignalKind } from '@beamdesk/core/protocol';
 import { fromBase64Url } from '@beamdesk/core/util';
 import type { Config } from './config.ts';
 import { DeviceRegistry } from './registry.ts';
-import { hasTurn, iceServersFor } from './ice.ts';
+import { hasTurn, iceServersFor, type SelfIce } from './ice.ts';
 import { securityHeaders, StaticSite } from './static.ts';
 
 const SIGNAL_KINDS = new Set<SignalKind>(['offer', 'answer', 'ice', 'auth', 'pending', 'auth-result', 'bye', 'invite']);
@@ -64,6 +66,8 @@ interface Client {
   requests: TokenBucket;
   presence: TokenBucket;
   registerTimer: ReturnType<typeof setTimeout> | null;
+  /** Built-in relay as this client reaches it (host mode only). */
+  selfIce: SelfIce | null;
 }
 
 /** Returns false if the JSON text nests deeper than `max` (strings are skipped). */
@@ -96,6 +100,24 @@ export function rateLimitKey(ip: string): string {
   return `${full.slice(0, 4).map((h) => h.toLowerCase().replace(/^0+(?=.)/, '')).join(':')}::/64`;
 }
 
+export interface ServerOptions {
+  /** Serve HTTPS/WSS with this certificate (TLS 1.3 only). */
+  tls?: { key: string; cert: string };
+  /**
+   * The server's own STUN/TURN relay (host mode). `endpointFor` gets the host name the client used
+   * to reach this server (from its Host header, null if unusable) and returns the relay address
+   * that client should use.
+   */
+  selfIce?: { secret: string; endpointFor(requestHost: string | null): { host: string; port: number } };
+  /** Upper bound on open TCP connections. */
+  maxConnections?: number;
+  /**
+   * Limits on raw TCP connections per client address, checked before any TLS work (host mode,
+   * where clients connect directly; never behind a reverse proxy).
+   */
+  perIpConnections?: { concurrent: number; perSecond: number; burst: number };
+}
+
 export interface BeamServer {
   http: http.Server;
   listen(): Promise<number>;
@@ -103,7 +125,16 @@ export interface BeamServer {
   stats(): { clients: number; registered: number; devices: number };
 }
 
-export function createBeamServer(config: Config): BeamServer {
+/** The host part of a Host header if it is a plain IP address or DNS name, else null. */
+export function requestHost(header: string | undefined): string | null {
+  if (!header || header.length > 300) return null;
+  const m = /^(?:\[([0-9a-f:.]+)\]|([^:]+))(?::\d{1,5})?$/i.exec(header.trim());
+  const host = (m?.[1] ?? m?.[2] ?? '').toLowerCase();
+  if (net.isIP(host)) return host;
+  return /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(host) ? host : null;
+}
+
+export function createBeamServer(config: Config, options: ServerOptions = {}): BeamServer {
   const site = new StaticSite(config.webRoot);
   const registry = new DeviceRegistry(config.dataDir);
   const online = new Map<string, Client>();
@@ -122,19 +153,23 @@ export function createBeamServer(config: Config): BeamServer {
     e.seen = Date.now();
     return e.bucket;
   };
-  const turn = hasTurn(config);
+  const turn = hasTurn(config) || !!options.selfIce;
   const serverInfo = { name: config.serverName, version: APP_VERSION, requiresKey: !!config.accessKey, turn };
 
   // Timeouts must be constructor options: assigned later as properties, Node ignores them,
   // which leaves the server open to slowloris (half-sent headers held forever).
-  const server = http.createServer({ headersTimeout: 15_000, requestTimeout: 30_000, connectionsCheckingInterval: 5_000, keepAliveTimeout: 5_000 }, (req, res) => {
+  const httpOptions = { headersTimeout: 15_000, requestTimeout: 30_000, connectionsCheckingInterval: 5_000, keepAliveTimeout: 5_000 };
+  const handler: http.RequestListener = (req, res) => {
     const url = req.url ?? '/';
     const headers = securityHeaders(isSecure(req, config.trustProxy));
+    // Public, read-only facts: the desktop app (origin app://beamdesk) reads them too.
+    const open = { ...headers, 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' };
     if (url === '/healthz' || url === '/api/health') {
-      return json(res, headers, 200, { ok: true, version: APP_VERSION, online: online.size });
+      // Private servers do not tell strangers how many devices use them.
+      return json(res, open, 200, { ok: true, version: APP_VERSION, online: config.accessKey ? undefined : online.size });
     }
     if (url === '/api/info') {
-      return json(res, headers, 200, { ...serverInfo, downloadUrl: config.downloadUrl });
+      return json(res, open, 200, { ...serverInfo, downloadUrl: config.downloadUrl });
     }
     if (site.handle(req, res, headers)) return;
     if (url === '/' && !site.enabled) {
@@ -143,7 +178,50 @@ export function createBeamServer(config: Config): BeamServer {
     }
     res.writeHead(404, { ...headers, 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not found\n');
-  });
+  };
+  const server: http.Server = options.tls
+    ? https.createServer(
+        {
+          ...httpOptions,
+          key: options.tls.key,
+          cert: options.tls.cert,
+          minVersion: 'TLSv1.3',
+          // A TLS handshake that has not finished in 10 s is not a real client.
+          handshakeTimeout: 10_000,
+          ALPNProtocols: ['http/1.1'],
+        },
+        handler,
+      )
+    : http.createServer(httpOptions, handler);
+  if (options.maxConnections) server.maxConnections = options.maxConnections;
+  const tcpLimits = options.perIpConnections;
+  if (tcpLimits) {
+    const open = new Map<string, number>();
+    const rate = new Map<string, { bucket: TokenBucket; seen: number }>();
+    server.on('connection', (socket: net.Socket) => {
+      const ip = rateLimitKey(socket.remoteAddress ?? 'unknown');
+      const n = open.get(ip) ?? 0;
+      if (n >= tcpLimits.concurrent || !bucketFor(rate, ip, tcpLimits.perSecond, tcpLimits.burst).take()) {
+        socket.destroy();
+        return;
+      }
+      open.set(ip, n + 1);
+      socket.once('close', () => {
+        const left = (open.get(ip) ?? 1) - 1;
+        if (left <= 0) open.delete(ip);
+        else open.set(ip, left);
+      });
+    });
+    const sweep = setInterval(() => {
+      for (const [ip, e] of rate) if (Date.now() - e.seen > 600_000) rate.delete(ip);
+    }, 60_000);
+    sweep.unref();
+    server.once('close', () => clearInterval(sweep));
+  }
+  if (options.tls) {
+    // Failed handshakes (scanners, old clients) are normal on an open port: just drop them.
+    server.on('tlsClientError', (_err, socket) => socket.destroy());
+  }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.wsMessageBytes, perMessageDeflate: false });
 
@@ -163,10 +241,12 @@ export function createBeamServer(config: Config): BeamServer {
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ip));
+    const self = options.selfIce;
+    const selfIce = self ? { ...self.endpointFor(requestHost(req.headers.host)), secret: self.secret } : null;
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, ip, selfIce));
   });
 
-  function onConnection(ws: WebSocket, ip: string): void {
+  function onConnection(ws: WebSocket, ip: string, selfIce: SelfIce | null): void {
     perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     const client: Client = {
       ws,
@@ -182,6 +262,7 @@ export function createBeamServer(config: Config): BeamServer {
       requests: new TokenBucket(0.5, 15),
       presence: new TokenBucket(0.2, 5),
       registerTimer: null,
+      selfIce,
     };
     client.registerTimer = setTimeout(() => {
       if (!client.id) shutdown(client, 4001, 'register timeout');
@@ -240,7 +321,7 @@ export function createBeamServer(config: Config): BeamServer {
         return send(client, { t: 'presence', rid, online: result });
       }
       case 'ice':
-        return send(client, { t: 'ice', rid, ice: iceServersFor(config, client.id) as RTCIceServer[] });
+        return send(client, { t: 'ice', rid, ice: iceServersFor(config, client.id, client.selfIce) as RTCIceServer[] });
       default:
         return fail(client, 'bad-request', 'unknown message type');
     }
@@ -283,7 +364,7 @@ export function createBeamServer(config: Config): BeamServer {
     client.id = id;
     client.name = typeof m.name === 'string' ? m.name.slice(0, LIMITS.nameChars) : '';
     online.set(id, client);
-    send(client, { t: 'registered', id, ice: iceServersFor(config, id) as RTCIceServer[] });
+    send(client, { t: 'registered', id, ice: iceServersFor(config, id, client.selfIce) as RTCIceServer[] });
   }
 
   function onSignal(client: Client, m: any): unknown {
@@ -354,8 +435,10 @@ export function createBeamServer(config: Config): BeamServer {
   return {
     http: server,
     listen: () =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
+        server.once('error', reject); // e.g. EADDRINUSE: the port is taken
         server.listen(config.port, config.host, () => {
+          server.off('error', reject);
           const addr = server.address();
           resolve(typeof addr === 'object' && addr ? addr.port : config.port);
         });

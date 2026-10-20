@@ -20,7 +20,10 @@ const common = {
   platform: 'node',
   target: 'node22',
   format: 'cjs',
-  external: ['electron', '@jitsi/robotjs'],
+  // bufferutil / utf-8-validate: optional native speedups of the ws package, not shipped.
+  external: ['electron', '@jitsi/robotjs', 'bufferutil', 'utf-8-validate'],
+  // server/src/config.ts looks for its web root via import.meta.url, which host mode never uses.
+  logOverride: { 'empty-import-meta': 'silent' },
   minify: !dev,
   sourcemap: dev ? 'inline' : false,
   logLevel: 'info',

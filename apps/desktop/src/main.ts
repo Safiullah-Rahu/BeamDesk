@@ -32,6 +32,8 @@ import { secureStorageAvailable, SettingsStore } from './store.ts';
 import { handleInput, inputAvailable, isWayland, releaseAll } from './input.ts';
 import { abortAll, abortFile, closeFile, createdFiles, openFile, writeFile } from './files.ts';
 import { adminConfig, lockScreen, openPermissionSettings, permissions, setLaunchAtLogin, startedHidden } from './system.ts';
+import { HostServer } from './hostserver.ts';
+import { PinnedSockets } from './pinnedsocket.ts';
 
 declare const __BEAMDESK_SERVER__: string;
 
@@ -120,6 +122,20 @@ function validDir(p: unknown): string | null {
 }
 let downloadsDir = validDir(store.get<string>('downloadsDir')) ?? path.join(app.getPath('downloads'), 'BeamDesk');
 
+/** Stored values only the main process may change or read (the UI goes through their own IPC). */
+const MAIN_ONLY_DATA = new Set(['downloadsDir', 'hostMode']);
+const MAIN_ONLY_SECRETS = new Set(['hostSecrets']);
+
+const hostServer = new HostServer({
+  store,
+  webRoot: WEB_DIR,
+  onChange: (info) => {
+    main?.webContents.send('hostmode:state', info);
+    updateTray();
+  },
+});
+const pinnedSockets = new PinnedSockets((host) => hostServer.pinFor(host));
+
 const minimizeToTray = () => (store.get<Record<string, unknown>>('settings')?.minimizeToTray ?? true) !== false;
 
 function linkFromArgv(argv: string[]): string | undefined {
@@ -170,12 +186,16 @@ function createMainWindow(): void {
   main.once('ready-to-show', () => {
     if (!hidden) main?.show();
   });
+  main.webContents.on('did-start-navigation', (d) => {
+    if (d.isMainFrame && !d.isSameDocument) pinnedSockets.closeAll(main!.webContents);
+  });
   main.webContents.on('did-finish-load', () => {
     rendererReady = true;
     for (const link of pendingLinks.splice(0)) main?.webContents.send('deep-link', link);
   });
   main.webContents.on('render-process-gone', (_e, d) => {
     console.error('[main] renderer gone', d.reason);
+    if (main) pinnedSockets.closeAll(main.webContents);
     releaseAll();
     // The sessions died with the renderer, which can no longer lock the screen as configured.
     if (hadSessions && store.get<Record<string, unknown>>('settings')?.lockOnEnd) void lockScreen();
@@ -230,15 +250,34 @@ function createSessionBar(): BrowserWindow {
   return w;
 }
 
+function hostLabel(): string {
+  const h = hostServer.info();
+  if (h.phase === 'running') return `Server on · ${h.status?.devices ?? 0} device${h.status?.devices === 1 ? '' : 's'}`;
+  if (h.phase === 'starting') return 'Server starting…';
+  if (h.phase === 'error') return 'Server could not start';
+  return '';
+}
+
 function updateTray(): void {
   if (!tray) return;
   const { id, sessions, online } = trayStatus;
   const pretty = id.replace(/(\d{3})(?=\d)/g, '$1 ');
-  tray.setToolTip(`BeamDesk${pretty ? ` — ID ${pretty}` : ''}${sessions ? ` — ${sessions} connected` : ''}${online ? '' : ' (offline)'}`);
+  const host = hostServer.info();
+  const hostLine = hostLabel();
+  tray.setToolTip(`BeamDesk${pretty ? ` — ID ${pretty}` : ''}${sessions ? ` — ${sessions} connected` : ''}${online ? '' : ' (offline)'}${hostLine ? ` — ${hostLine}` : ''}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Open BeamDesk', click: showMain },
       { label: pretty ? `Copy my ID (${pretty})` : 'Copy my ID', enabled: !!id, click: () => clipboard.writeText(id) },
+      { type: 'separator' },
+      {
+        label: 'Host mode (this computer is the server)',
+        type: 'checkbox',
+        checked: host.config.enabled,
+        click: (item) => void hostServer.set({ enabled: item.checked }),
+      },
+      ...(hostLine ? [{ label: hostLine, enabled: false }] : []),
+      ...(host.status?.code ? [{ label: 'Copy connection code', click: () => clipboard.writeText(host.status!.code) }] : []),
       { type: 'separator' },
       { label: sessions ? `End ${sessions} session${sessions > 1 ? 's' : ''}` : 'No active sessions', enabled: sessions > 0, click: () => main?.webContents.send('session-bar:action', { type: 'end-all' }) },
       { type: 'separator' },
@@ -289,15 +328,28 @@ function registerIpc(): void {
       return fn(e, ...args);
     });
 
-  on('store:load', (e) => (e.returnValue = store.load()));
+  on('store:load', (e) => (e.returnValue = store.load(MAIN_ONLY_SECRETS)));
   on('store:set', (_e, key, value) => {
     // Where files are written is decided in the main process (folder picker) only: a page that
-    // could set it could drop received files into e.g. the Startup folder.
-    if (key === 'downloadsDir') return;
+    // could set it could drop received files into e.g. the Startup folder. Host mode settings
+    // are validated by their own handler.
+    if (MAIN_ONLY_DATA.has(key)) return;
     store.set(key, value);
     if (key === 'settings' && value && typeof value === 'object') setLaunchAtLogin(!!(value as any).launchAtLogin);
   });
-  on('store:secret', (_e, key, value) => store.setSecret(key, value));
+  on('store:secret', (_e, key, value) => {
+    if (MAIN_ONLY_SECRETS.has(key)) return;
+    store.setSecret(key, value);
+    // The home server this device joined: accept its certificate from now on.
+    if (key === 'homeServer') hostServer.updatePins();
+  });
+  on('hostmode:get', (e) => (e.returnValue = hostServer.info()));
+  handle('hostmode:set', (_e, patch) => hostServer.set(patch));
+  handle('hostmode:regenerate', () => hostServer.regenerate());
+  on('hostmode:refresh', () => hostServer.refresh());
+  handle('pws:open', (e, url) => pinnedSockets.open(e.sender, url));
+  on('pws:send', (e, id, data) => pinnedSockets.send(e.sender, id, data));
+  on('pws:close', (e, id, code, reason) => pinnedSockets.close(e.sender, id, code, reason));
   on('app:info', (e) => (e.returnValue = { version: app.getVersion(), os: process.platform, defaultServer, wayland: isWayland, inputAvailable: inputAvailable(), secureStorage: secureStorageAvailable() }));
 
   handle('displays', async () => {
@@ -448,6 +500,17 @@ app.on('before-quit', () => {
   store.flush();
 });
 
+// Turning the server off removes the router's port forwarding: wait for that (a few seconds at
+// most). Windows are closed and settings saved by now; a second app.quit() would not exit here.
+let hostStopping = false;
+app.on('will-quit', (e) => {
+  if (hostServer.info().phase === 'off') return;
+  e.preventDefault();
+  if (hostStopping) return;
+  hostStopping = true;
+  void hostServer.shutdown().finally(() => app.exit(0));
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' || !tray) app.quit();
 });
@@ -474,6 +537,7 @@ void app.whenReady().then(() => {
     return new Response(res.body, { status: 200, headers });
   });
   hardenSessions();
+  hostServer.init();
   registerIpc();
   createMainWindow();
   createTray();

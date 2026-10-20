@@ -38,13 +38,20 @@ export class SettingsStore {
     }
   }
 
-  load(): { data: Record<string, unknown>; secrets: Record<string, string> } {
+  /** Everything, for the UI. Keys in `hidden` stay in the main process (e.g. the server's private key). */
+  load(hidden: ReadonlySet<string> = new Set()): { data: Record<string, unknown>; secrets: Record<string, string> } {
     const secrets: Record<string, string> = {};
     for (const [k, v] of Object.entries(this.state.secrets)) {
+      if (hidden.has(k)) continue;
       const plain = this.decrypt(v);
       if (plain !== null) secrets[k] = plain;
     }
     return { data: this.state.data, secrets };
+  }
+
+  getSecret(key: string): string | null {
+    const v = this.state.secrets[key];
+    return v === undefined ? null : this.decrypt(v);
   }
 
   get<T>(key: string): T | undefined {
