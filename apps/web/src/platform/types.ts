@@ -1,4 +1,4 @@
-import type { FileSinkFactory, HostPlatform, Platform } from '@beamdesk/core';
+import type { DesktopBridge, FileSinkFactory, HostPlatform, Platform } from '@beamdesk/core';
 
 export interface KeyValueStore {
   /** Everything persisted so far (synchronous, loaded once at startup). */
@@ -37,6 +37,10 @@ export interface DesktopExtras {
   /** False when secrets are stored without OS keychain protection. */
   secureStorage: boolean;
   quit(): void;
+  /** Running the BeamDesk server on this computer. */
+  hostMode: DesktopBridge['hostMode'];
+  /** Opens a WebSocket to a home server, its certificate checked against the connection code. */
+  pinnedSocket(url: string): WebSocket;
 }
 
 export interface AppPlatform {

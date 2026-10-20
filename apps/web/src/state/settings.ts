@@ -8,6 +8,8 @@ export interface Settings {
   theme: Theme;
   serverUrl: string;
   accessKey: string;
+  /** Desktop: use the server address above, or the home server joined with a connection code. */
+  connection: 'server' | 'home';
 
   // Incoming connections (this device as host)
   access: 'ask' | 'password' | 'off';
@@ -80,6 +82,7 @@ export function defaultSettings(os: Platform, kind: 'desktop' | 'web'): Settings
     theme: 'system',
     serverUrl: '',
     accessKey: '',
+    connection: 'server',
     access: 'ask',
     oneTimePassword: true,
     otpLength: 6,

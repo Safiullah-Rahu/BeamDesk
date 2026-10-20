@@ -12,3 +12,4 @@ export * from './signaling.ts';
 export * from './viewer.ts';
 export * from './host.ts';
 export * from './bridge.ts';
+export * from './joincode.ts';

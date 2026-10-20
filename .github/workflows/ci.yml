@@ -38,10 +38,10 @@ jobs:
       - run: npx playwright install chromium
       - name: End-to-end tests (browser to browser, and attacks through a tampering relay)
         run: npx playwright test -c e2e/playwright.config.ts web.spec.ts security.spec.ts
-      - name: End-to-end test (desktop app as host)
+      - name: End-to-end tests (desktop app as host, and host mode)
         env:
           BEAMDESK_E2E_DESKTOP: '1'
-        run: xvfb-run -a -s "-screen 0 1280x800x24" npx playwright test -c e2e/playwright.config.ts desktop.spec.ts
+        run: xvfb-run -a -s "-screen 0 1280x800x24" npx playwright test -c e2e/playwright.config.ts desktop.spec.ts hostmode.spec.ts
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

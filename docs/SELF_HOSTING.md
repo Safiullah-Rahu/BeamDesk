@@ -10,8 +10,11 @@ BeamDesk needs one small server. It:
 Screen video, input, chat, clipboard and files **never pass through it** — they flow directly between devices, end-to-end encrypted.
 When two networks are too strict for a direct connection (some corporate or mobile networks), traffic goes through a **TURN relay**, which only ever sees encrypted packets.
 
-**Requirements:** any Linux machine with a public IP (1 vCPU / 512 MB RAM is plenty for thousands of devices), a domain name, and Docker. HTTPS is mandatory because browsers only allow screen sharing and encryption APIs on secure pages.
+**No server at all?** The desktop app can be the server itself: see [host mode](#host-mode--a-computer-at-home-is-the-server) below.
 
+**Requirements for a server:** any Linux machine with a public IP (1 vCPU / 512 MB RAM is plenty for thousands of devices), a domain name, and Docker. HTTPS is mandatory because browsers only allow screen sharing and encryption APIs on secure pages.
+
+- [Host mode — a computer at home is the server](#host-mode--a-computer-at-home-is-the-server)
 - [Option A — Docker Compose with HTTPS and TURN (recommended)](#option-a--docker-compose-with-https-and-turn-recommended)
 - [Option B — Render (one click)](#option-b--render)
 - [Option C — Fly.io](#option-c--flyio)
@@ -21,6 +24,43 @@ When two networks are too strict for a direct connection (some corporate or mobi
 - [Point the apps at your server](#point-the-apps-at-your-server)
 - [Private servers](#private-servers)
 - [Operations](#operations)
+
+---
+
+## Host mode — a computer at home is the server
+
+For a household or a small office the desktop app can run the whole server: **Settings → Network →
+This computer is the server → Host mode**. Step by step for users: [user guide](USER_GUIDE.md#make-one-of-your-computers-the-server-host-mode).
+
+What it starts, all on **one port number** (default `41443`, TCP and UDP):
+
+| | |
+|---|---|
+| Signaling server + browser version | HTTPS / WSS, TLS 1.3 only, with a self-signed ECDSA P-256 certificate created on first start |
+| STUN/TURN relay | Built in (UDP). Only connects devices of this server *with each other*, so it cannot reach anything else on the network |
+| Router | Asks for port forwarding with UPnP IGD, then NAT-PMP; leases renewed every 30 minutes, removed when host mode stops |
+| Connection code | `BD1-…`: the server's addresses (home network, Tailscale, internet, optional DNS name), the SHA-256 fingerprint of its certificate and a 128-bit access key |
+
+Devices that join with the code accept the server's certificate **only** if it matches the fingerprint
+in the code (certificate pinning; no certificate authority involved), and the server lets only devices
+with the access key register. Browsers get a link with the key in the `#fragment`; they show a
+certificate warning once, because a home server's certificate is not issued by a company.
+
+**Reaching it from outside the home**, in order of preference:
+
+1. **Tailscale** on the host computer and your devices: the Tailscale address is put into the code automatically, nothing to configure on the router, works behind carrier-grade NAT.
+2. **Automatic port forwarding** (on by default): works with most home routers that have UPnP or NAT-PMP enabled.
+3. **Manual port forwarding**: forward port `41443` **TCP and UDP** to the host computer, and reserve its address in the router.
+4. A **dynamic DNS** name (Advanced → *Internet name*) keeps the code stable when the provider changes your internet address.
+
+Behind carrier-grade NAT (the router's "internet address" is itself private, e.g. `100.64.x.x`) the
+computer cannot be reached from the internet; BeamDesk says so and Tailscale (or a cloud server, below) is the way.
+
+**Limits:** host mode is sized for a household: 256 connections, 32 relayed streams of up to 4 MB/s,
+16 connections per address. The computer must stay on (BeamDesk keeps it awake while hosting, starts at
+sign-in and turns host mode back on). Data (certificate, keys, device registry) lives in the app's data
+folder; the private key is encrypted with the operating system's keychain. **Make a new code** replaces
+the certificate and both keys, so every old code stops working.
 
 ---
 
@@ -190,7 +230,7 @@ ICE_SERVERS_JSON='[{"urls":"stun:stun.cloudflare.com:3478"},{"urls":["turn:turn.
 ## Point the apps at your server
 
 - **Browser version:** just open your server's address — it connects to itself automatically.
-- **Desktop app:** Settings → Network → *Server address* → `desk.example.com` → **Save and reconnect**.
+- **Desktop app:** Settings → Network → *Server address* → `desk.example.com` → **Use this server**.
 - **Your own installers with the address built in** (best for non-technical users):
   1. In your fork on GitHub: Settings → Secrets and variables → Actions → **Variables** → add `BEAMDESK_SERVER_URL` = `https://desk.example.com`.
   2. On the **Actions** tab open **Release desktop apps** → **Run workflow**, and enter the version from `package.json` (e.g. `v1.0.0`). Pushing a tag (`git tag v1.0.0 && git push origin v1.0.0`) works too.
@@ -212,7 +252,7 @@ Set `ACCESS_KEY` to a long random string (`openssl rand -hex 24`). Devices witho
 
 ## Operations
 
-- **Health:** `GET /healthz` returns `{"ok":true,"online":<devices>}` — use it for uptime monitoring.
+- **Health:** `GET /healthz` returns `{"ok":true,"online":<devices>}` — use it for uptime monitoring. Private servers (with `ACCESS_KEY`) leave out the device count.
 - **Backups:** only `DATA_DIR/devices.json` matters. It maps IDs to device keys so nobody can take over an existing ID. Losing it is not dangerous; IDs are simply claimable again by the first device that registers them (and every device still verifies the other side's key end to end).
 - **Logs:** the server logs startup information and errors only. It never logs connection contents.
 - **Scaling:** one instance handles tens of thousands of idle devices. Signaling is in-memory, so run a single instance per server address (put several servers behind different addresses if you need more).

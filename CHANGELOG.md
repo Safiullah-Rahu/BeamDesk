@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0 — host mode
+
+**Make one of your computers the BeamDesk server**, with no outside service: Settings → Network → *This computer is the server*.
+
+- The desktop app runs the signaling server over HTTPS/WSS (TLS 1.3 only) with its own self-signed certificate, plus a built-in STUN/TURN relay — all on one port (41443, TCP and UDP).
+- **Connection codes** (`BD1-…`) for your other computers carry the server's addresses (home network, Tailscale, internet, an optional dynamic DNS name), its certificate fingerprint and a 128-bit access key. Apps accept that exact certificate only (pinned, checked before any message), and try every address at once.
+- Opens the port on the router automatically (UPnP IGD, then NAT-PMP), renews the lease and closes it again when host mode stops. Detects carrier-grade NAT and Tailscale, and checks whether the server is reachable.
+- Easy to switch on and off: a switch in Settings and in the tray menu; after a restart BeamDesk starts at sign-in and turns host mode back on with the same code; keeps the computer awake while hosting (optional).
+- The relay only connects devices of this server with each other — it cannot be used to reach the home network, other programs on the computer, or the internet. Quotas per device and in total, rate-limited answers to strangers, per-address connection limits, no owner name or device count in public responses.
+- A link for phones and browsers (access key in the `#fragment`), *Make a new code* to lock out every old code, an *Internet name* for dynamic DNS.
+- Settings → Network redesigned: server address, connection code or host mode, with step-by-step guides for Tailscale, a free Render server and manual port forwarding.
+- Fixed: the server information line in Settings → Network always said "Could not reach the server" in the desktop app (missing CORS header on `/api/info`).
+- The Windows "Publisher" is now Neurosmith.
+
 ## 1.0.1
 
 - The "Save this file?" dialog names the sender by its verified device name and ID instead of only a number.

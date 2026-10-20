@@ -76,6 +76,19 @@ verified before (no pin, no link) also requires the host's confirmation tag; wit
 connection stops. Once the data channels are open, only messages on them can end a session —
 signaling `bye`/`pending` injected by the server are ignored.
 
+## Host mode (a computer is the server)
+
+When the desktop app runs the server itself (Settings → Network → *This computer is the server*):
+
+- **Server authentication by pinning.** The server has a self-signed ECDSA P-256 certificate (TLS 1.3 only). The connection code carries the SHA-256 fingerprint of that certificate; joining apps open their signaling connection from the main process with Node's TLS and drop it before any message is exchanged unless the certificate matches exactly. No certificate authority, DNS or outside service is trusted, and a corrected code takes effect at once (nothing is cached).
+- **Client authorization.** A random 128-bit access key, also in the code, is required to register (compared in constant time; one attempt per connection). The code is protected by a 24-bit checksum against typos. *Make a new code* replaces the certificate, the access key and the relay secret, so every old code stops working.
+- **Relay without reach.** The built-in STUN/TURN server (RFC 5389/5766, UDP) issues allocations only for short-lived HMAC credentials that the signaling server hands to registered devices (1 hour), with stateless nonces bound to the client address. It relays only between its own allocations: a device can never use it to reach this computer's other services, the home network or the internet. Relayed traffic stays DTLS-encrypted end to end. Quotas: 32 allocations, 4 per device, 4 MB/s each; answers to unauthenticated sources are rate limited so the port cannot be used to reflect traffic at others.
+- **Exposure.** One port (TCP+UDP). Per-address TCP limits apply before the TLS handshake, handshakes must finish within 10 s, and the public `/api/info` shows neither the owner's name nor how many devices are connected. The router mapping (UPnP/NAT-PMP) covers only this port to this computer, is leased and renewed while host mode runs, and is removed when it stops. UPnP answers are only followed to the device that sent them, on the home network.
+- **Secrets at rest.** The private key, access key and relay secret are stored with the OS keychain (Electron `safeStorage`) and never handed to the UI process; the UI only receives the access key it needs to connect.
+- **What the host computer can see** is what any BeamDesk server sees (see above); sessions remain end-to-end encrypted and authenticated between the devices.
+
+Known limits: anyone with the code can use the server until a new code is made (there is no per-device revocation yet); browsers cannot pin and rely on the user checking the certificate warning once; a dynamic DNS name moves trust for that address to the DNS provider only for *finding* the server — the pinned certificate still decides whether the app talks to it.
+
 ## Hardening in the apps
 
 - Electron: `contextIsolation`, `sandbox`, no Node.js in the page, a minimal preload bridge, IPC accepted only from the app's own origin, navigation and new windows blocked, permissions granted only to the app origin, strict Content Security Policy.

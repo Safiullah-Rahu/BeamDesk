@@ -4,10 +4,12 @@
  */
 import { batch, computed, signal } from '@preact/signals';
 import {
+  decodeJoinCode,
   derivePasswordSecret,
   formatId,
   fromBase64Url,
   generateOneTimePassword,
+  homeServerUrls,
   HostService,
   Identity,
   isKeyHash,
@@ -21,6 +23,9 @@ import {
   toBase64Url,
   ViewerSession,
   type FileMeta,
+  type HomeServer,
+  type HostModeConfig,
+  type HostModeInfo,
   type HostSession,
   type HostSettings,
   type IncomingRequest,
@@ -92,6 +97,7 @@ export const otp = signal('');
 export const tabs = signal<Tab[]>([]);
 export const activeTab = signal<string>('home');
 export const settingsOpen = signal(false);
+export const settingsSection = signal<'general' | 'security' | 'network' | 'video' | 'about'>('general');
 export const requests = signal<IncomingRequest[]>([]);
 export const hosted = signal<HostSession[]>([]);
 export const contacts = signal<Contact[]>(Array.isArray(stored.data.contacts) ? (stored.data.contacts as Contact[]) : []);
@@ -105,8 +111,40 @@ export const hasPermanentPassword = signal(!!stored.secrets.permPrs);
 export const sharing = signal(platform.kind === 'desktop');
 export const help = signal<HelpRequest | null>(null);
 export const fileRequests = signal<FileRequest[]>([]);
-export const serverUrls = computed(() => normalizeServerUrl(settings.value.serverUrl || platform.defaultServer));
-export const needsServer = computed(() => !serverUrls.value);
+/** Host mode (desktop): this computer runs the BeamDesk server. */
+export const hostMode = signal<HostModeInfo | null>(platform.desktop?.hostMode?.get() ?? null);
+/** The home server this device joined with a connection code (desktop). */
+export const homeServer = signal<HomeServer | null>(decodeJoinCode(stored.secrets.homeServer ?? ''));
+/** A connection code from a beamdesk://join link, waiting for the user to confirm. */
+export const pendingJoin = signal<string | null>(null);
+
+export interface ServerTarget {
+  kind: 'server' | 'home' | 'host';
+  /** WebSocket address(es): a home server may be reachable several ways. */
+  ws: string | string[];
+  /** Base of links for browsers. */
+  http: string;
+  accessKey: string;
+  /** Certificate fingerprint of a home server (another one means: reconnect). */
+  pin?: string;
+}
+
+/** Where this device's signaling connects: its own server, a joined home server, or a server address. */
+export const serverTarget = computed<ServerTarget | null>(() => {
+  const hm = hostMode.value;
+  if (hm?.config.enabled && hm.localUrl) {
+    return { kind: 'host', ws: hm.localUrl, http: hm.status?.browserUrls.at(-1) ?? '', accessKey: hm.accessKey ?? '', pin: hm.status?.fingerprint };
+  }
+  const home = homeServer.value;
+  if (platform.kind === 'desktop' && settings.value.connection === 'home' && home) {
+    const web = home.addresses.find((a) => a.kind === 'name') ?? home.addresses.find((a) => a.kind === 'internet') ?? home.addresses[0];
+    return { kind: 'home', ws: homeServerUrls(home), http: web ? `https://${web.host}:${web.port}` : '', accessKey: home.accessKey, pin: home.fingerprint };
+  }
+  const urls = normalizeServerUrl(settings.value.serverUrl || platform.defaultServer);
+  return urls ? { kind: 'server', ws: urls.ws, http: urls.http, accessKey: settings.value.accessKey } : null;
+});
+export const serverUrls = computed(() => (serverTarget.value ? { http: serverTarget.value.http } : null));
+export const needsServer = computed(() => !serverTarget.value);
 
 let identity: Identity;
 let signaling: SignalingClient | null = null;
@@ -147,13 +185,60 @@ export function updateSettings(patch: Partial<Settings>): void {
   if (patch.otpLength !== undefined && patch.otpLength !== prev.otpLength) void rotateOtp();
   if (patch.oneTimePassword === true && !otp.value) void rotateOtp();
   syncHostSettings();
-  if (
-    signaling &&
-    (patch.serverUrl !== undefined || patch.accessKey !== undefined || patch.deviceName !== undefined) &&
-    (prev.serverUrl !== next.serverUrl || prev.accessKey !== next.accessKey || prev.deviceName !== next.deviceName)
-  ) {
-    restartSignaling();
-  }
+  if (signaling && prev.deviceName !== next.deviceName) restartSignaling();
+  else retarget();
+}
+
+let currentTarget = '';
+const targetKey = (t: ServerTarget | null) => JSON.stringify(t ? [t.ws, t.accessKey, t.pin] : null);
+
+/** Reconnects if where this device should connect has changed. */
+function retarget(): void {
+  if (targetKey(serverTarget.value) !== currentTarget && identity) restartSignaling();
+}
+
+/** Uses the home server in a connection code. Returns false if the code is not valid. */
+export function joinHomeServer(code: string): boolean {
+  const server = decodeJoinCode(code);
+  if (!server) return false;
+  stored.setSecret('homeServer', code.trim());
+  // A synchronous call after the write: the app trusts the server's certificate before we connect.
+  platform.desktop?.hostMode.get();
+  homeServer.value = server;
+  updateSettings({ connection: 'home' });
+  retarget();
+  return true;
+}
+
+export function leaveHomeServer(): void {
+  stored.setSecret('homeServer', null);
+  homeServer.value = null;
+  updateSettings({ connection: 'server' });
+}
+
+export async function setHostMode(patch: Partial<HostModeConfig>): Promise<void> {
+  const hm = platform.desktop?.hostMode;
+  if (!hm) return;
+  applyHostMode(await hm.set(patch));
+  // A server people rely on comes back after a restart.
+  if (patch.enabled && !settings.value.launchAtLogin) updateSettings({ launchAtLogin: true });
+}
+
+export async function regenerateHostCode(): Promise<void> {
+  const hm = platform.desktop?.hostMode;
+  if (hm) applyHostMode(await hm.regenerate());
+}
+
+function applyHostMode(info: HostModeInfo): void {
+  const prev = hostMode.value;
+  hostMode.value = info;
+  if (info.phase === 'error' && prev?.phase !== 'error') toast(`The server on this computer could not start: ${info.error}`, 'error', { label: 'Details', run: () => openSettings('network') }, 10_000);
+  retarget();
+}
+
+export function openSettings(section: typeof settingsSection.value = 'general'): void {
+  settingsSection.value = section;
+  settingsOpen.value = true;
 }
 
 function hostSettings(): HostSettings {
@@ -294,10 +379,19 @@ function restartSignaling(): void {
 }
 
 function startSignaling(): void {
-  const urls = serverUrls.value;
-  if (!urls) return;
+  const target = serverTarget.value;
+  currentTarget = targetKey(target);
+  if (!target) return;
   const s = settings.value;
-  signaling = new SignalingClient({ url: urls.ws, identity, name: s.deviceName, platform: platform.os, accessKey: s.accessKey });
+  signaling = new SignalingClient({
+    url: target.ws,
+    identity,
+    name: s.deviceName,
+    platform: platform.os,
+    accessKey: target.accessKey,
+    // Home servers (and our own) have self-signed certificates, pinned by the desktop app.
+    createWebSocket: target.kind === 'server' ? undefined : platform.desktop?.pinnedSocket,
+  });
   signaling.on('error', (e) => {
     if (e.code === 'id-conflict') void regenerateIdentity();
   });
@@ -596,7 +690,10 @@ const hostFileConsent = (meta: FileMeta, from: string): Promise<boolean> => askF
 
 export type Link =
   | { type: 'connect'; id: string; password?: string; key?: string }
-  | { type: 'help'; id: string; name?: string; key?: string; token?: string };
+  | { type: 'help'; id: string; name?: string; key?: string; token?: string }
+  | { type: 'join'; code: string }
+  /** Browser link from a home server: its access key (the fragment never reaches any server). */
+  | { type: 'key'; key: string };
 
 /** A connect link waiting for the user's confirmation (links never connect on their own). */
 export const pendingLink = signal<Extract<Link, { type: 'connect' }> | null>(null);
@@ -617,6 +714,9 @@ export function parseLink(raw: string): Link | null {
     return null;
   }
   const seg = path.split('/').filter(Boolean);
+  if (seg[0] === 'join' && seg[1] && decodeJoinCode(seg[1])) return { type: 'join', code: seg[1] };
+  const accessKey = params.get('key');
+  if (accessKey && /^[A-Za-z0-9_-]{22}$/.test(accessKey)) return { type: 'key', key: accessKey };
   const k = params.get('k');
   const key = isKeyHash(k) ? k : undefined;
   const connectId = parseId(params.get('c') ?? (seg[0] === 'connect' ? seg[1] ?? '' : ''));
@@ -632,7 +732,21 @@ export async function handleLink(raw: string): Promise<void> {
   const link = parseLink(raw);
   if (!link) return;
   platform.attention();
-  if (link.type === 'connect') {
+  if (link.type === 'key') {
+    // Only the browser version: it uses the server it was opened from.
+    if (platform.kind === 'web' && link.key !== settings.value.accessKey) {
+      updateSettings({ accessKey: link.key });
+      toast('Access key for this home server saved in this browser.', 'success');
+    }
+    return;
+  }
+  if (link.type === 'join') {
+    // Switching servers is the user's decision: show the code in Settings → Network.
+    if (platform.kind === 'desktop') {
+      pendingJoin.value = link.code;
+      openSettings('network');
+    }
+  } else if (link.type === 'connect') {
     // Any web page can open a link: always let the user confirm before dialling.
     if (link.id !== myId.value) pendingLink.value = link;
   } else if (link.id !== myId.value) {
@@ -696,6 +810,7 @@ export async function boot(): Promise<void> {
   startSignaling();
   presenceTimer ??= setInterval(() => void refreshPresence(), 30_000);
   platform.desktop?.onDeepLink((url) => void handleLink(url));
+  platform.desktop?.hostMode?.onChange((info) => applyHostMode(info));
   platform.desktop?.onSessionBarAction((a) => {
     if (a.type === 'end' && a.sid) endHostedSession(a.sid);
     else if (a.type === 'end-all') endAllHosted();

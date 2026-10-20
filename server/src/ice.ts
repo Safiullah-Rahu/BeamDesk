@@ -11,7 +11,23 @@ export interface IceServer {
   credential?: string;
 }
 
-export function iceServersFor(config: Config, deviceId: string): IceServer[] {
+/** The server's own STUN/TURN relay (host mode), as seen from one client. */
+export interface SelfIce {
+  host: string;
+  port: number;
+  secret: string;
+}
+
+export function iceServersFor(config: Config, deviceId: string, self?: SelfIce | null): IceServer[] {
+  if (self) {
+    const host = self.host.includes(':') ? `[${self.host}]` : self.host;
+    const username = `${Math.floor(Date.now() / 1000) + config.turnTtl}:${deviceId}`;
+    const credential = crypto.createHmac('sha1', self.secret).update(username).digest('base64');
+    return [
+      { urls: [`stun:${host}:${self.port}`] },
+      { urls: [`turn:${host}:${self.port}?transport=udp`], username, credential },
+    ];
+  }
   if (config.iceServersJson) {
     try {
       const parsed = JSON.parse(config.iceServersJson);

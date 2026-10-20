@@ -1,11 +1,16 @@
 {
   "name": "@beamdesk/server",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "BeamDesk signaling server: device registry, connection relay, TURN credentials and the web app.",
   "license": "MIT",
   "type": "module",
   "main": "dist/server.mjs",
+  "exports": {
+    ".": "./dist/server.mjs",
+    "./hostmode": "./src/hostmode.ts",
+    "./cert": "./src/cert.ts"
+  },
   "scripts": {
     "dev": "node --experimental-strip-types --watch src/index.ts",
     "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/server.mjs --external:bufferutil --external:utf-8-validate --legal-comments=none \"--banner:js=import { createRequire as __bdRequire } from 'node:module'; const require = __bdRequire(import.meta.url);\"",

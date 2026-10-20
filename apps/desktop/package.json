@@ -1,12 +1,12 @@
 {
   "name": "beamdesk-desktop",
   "productName": "BeamDesk",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "BeamDesk — free, open-source, end-to-end encrypted remote desktop.",
   "license": "MIT",
   "author": {
-    "name": "BeamDesk contributors",
+    "name": "Neurosmith",
     "email": "safiullahrahu1555@gmail.com"
   },
   "homepage": "https://github.com/Safiullah-Rahu/BeamDesk",
@@ -23,8 +23,11 @@
   },
   "devDependencies": {
     "@beamdesk/core": "*",
+    "@beamdesk/server": "*",
+    "@types/ws": "^8.18.1",
     "electron": "44.9.0",
     "electron-builder": "26.15.3",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "ws": "^8.18.3"
   }
 }
