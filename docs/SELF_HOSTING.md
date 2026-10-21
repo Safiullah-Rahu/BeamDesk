@@ -39,24 +39,26 @@ What it starts, all on **one port number** (default `41443`, TCP and UDP):
 | Signaling server + browser version | HTTPS / WSS, TLS 1.3 only, with a self-signed ECDSA P-256 certificate created on first start |
 | STUN/TURN relay | Built in (UDP). Only connects devices of this server *with each other*, so it cannot reach anything else on the network |
 | Router | Asks for port forwarding with UPnP IGD, then NAT-PMP; leases renewed every 30 minutes, removed when host mode stops |
-| Connection code | `BD1-…`: the server's addresses (home network, Tailscale, internet, optional DNS name), the SHA-256 fingerprint of its certificate and a 128-bit access key |
+| Beacon | Reachable behind carrier-grade NAT and without port forwarding: an end-to-end encrypted tunnel through public Nostr relays (several at once; your own if you like) for the signaling only |
+| Connection code | `BD2-…`: the server's addresses (home network, Tailscale, internet, optional DNS name), the SHA-256 fingerprint of its certificate, a 128-bit access key and the beacon's public key (plus custom relays) |
 
 Devices that join with the code accept the server's certificate **only** if it matches the fingerprint
 in the code (certificate pinning; no certificate authority involved), and the server lets only devices
 with the access key register. Browsers get a link with the key in the `#fragment`; they show a
 certificate warning once, because a home server's certificate is not issued by a company.
 
-**Reaching it from outside the home**, in order of preference:
+**Reaching it from outside the home** needs nothing: the **beacon** is on by default. Devices try
+every way at once and use the first that answers — home network, Tailscale, the internet address
+(when the router opened the port), and the beacon. After that, the remote session itself goes
+directly between the devices (WebRTC, with public STUN servers to find the way through NAT).
 
-1. **Tailscale** on the host computer and your devices: the Tailscale address is put into the code automatically, nothing to configure on the router, works behind carrier-grade NAT.
-2. **Automatic port forwarding** (on by default): works with most home routers that have UPnP or NAT-PMP enabled.
-3. **Manual port forwarding**: forward port `41443` **TCP and UDP** to the host computer, and reserve its address in the router.
-4. A **dynamic DNS** name (Advanced → *Internet name*) keeps the code stable when the provider changes your internet address.
+- **Behind carrier-grade NAT** (the router's "internet address" is itself private, e.g. `100.64.x.x`) only the beacon (or Tailscale) can reach the computer; BeamDesk says so.
+- **Relays:** the default list has several independent public relays. Advanced → *Beacon relays* takes up to four of your own (`wss://…`), e.g. a [strfry](https://github.com/hoytech/strfry) relay you run; they go into the code.
+- **Phones:** the *link for phones* opens the browser version from GitHub Pages (`.github/workflows/pages.yml`; in a fork, enable Pages with source *GitHub Actions* and build with `BEAMDESK_WEB_APP_URL` set to your Pages address) and joins through the beacon.
+- **Very strict networks on both sides** (both devices behind symmetric NAT) cannot connect the screen directly; then Tailscale, or a server with a TURN relay (Option A), is needed.
+- Port forwarding (automatic or by hand: port `41443`, TCP and UDP) and a dynamic DNS name remain useful for direct connections without the relays.
 
-Behind carrier-grade NAT (the router's "internet address" is itself private, e.g. `100.64.x.x`) the
-computer cannot be reached from the internet; BeamDesk says so and Tailscale (or a cloud server, below) is the way.
-
-**Limits:** host mode is sized for a household: 256 connections, 32 relayed streams of up to 4 MB/s,
+**Limits:** host mode is sized for a household (and at most 32 devices through the beacon at once): 256 connections, 32 relayed streams of up to 4 MB/s,
 16 connections per address. The computer must stay on (BeamDesk keeps it awake while hosting, starts at
 sign-in and turns host mode back on). Data (certificate, keys, device registry) lives in the app's data
 folder; the private key is encrypted with the operating system's keychain. **Make a new code** replaces

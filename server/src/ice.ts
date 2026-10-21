@@ -26,6 +26,8 @@ export function iceServersFor(config: Config, deviceId: string, self?: SelfIce |
     return [
       { urls: [`stun:${host}:${self.port}`] },
       { urls: [`turn:${host}:${self.port}?transport=udp`], username, credential },
+      // Host mode with the beacon: public STUN too, for devices behind carrier-grade NAT.
+      ...(config.stunUrls.length ? [{ urls: config.stunUrls }] : []),
     ];
   }
   if (config.iceServersJson) {

@@ -3,6 +3,7 @@ import type { FileSink, FileSinkFactory, Platform } from '@beamdesk/core';
 import type { AppPlatform, KeyValueStore } from './types.ts';
 
 declare const __DEFAULT_SERVER__: string;
+declare const __STATIC_SITE__: boolean;
 
 const DATA_KEY = 'beamdesk:data';
 const SECRETS_KEY = 'beamdesk:secrets';
@@ -102,7 +103,7 @@ export function createWebPlatform(): AppPlatform {
     kind: 'web',
     os: detectOs(),
     // A build can point at a remote server (e.g. the app hosted on a CDN); otherwise use this origin.
-    defaultServer: __DEFAULT_SERVER__ || (location.protocol.startsWith('http') ? location.origin : ''),
+    defaultServer: __DEFAULT_SERVER__ || (location.protocol.startsWith('http') && !__STATIC_SITE__ ? location.origin : ''),
     store: localStore(),
     host: {
       kind: 'web',

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 — host mode works behind carrier-grade NAT
+
+**The beacon.** A computer in host mode is now reachable from anywhere, even when nothing can connect to it (carrier-grade NAT, no port forwarding, a strict firewall), and still without any account or server of your own:
+
+- The computer keeps a connection to several independent public Nostr relays. Devices with the connection code meet it there through an end-to-end encrypted tunnel (a Noise-style handshake with X25519 and the code's access key; AES-256-GCM, forward secret). The relays only pass on ciphertext between one-time keys, under a meeting point that changes daily; they cannot read, change, replay or fake anything, and any of them may fail.
+- Only the introduction goes through the tunnel: the remote session then connects directly between the devices, as always (public STUN servers help it through carrier-grade NAT).
+- On by default, with its own line in host mode ("Anywhere, through the beacon: ready"). Your own relays can be set under Advanced.
+- Codes are now `BD2-…` (they carry the beacon key). Codes stay valid when your internet address changes: devices learn the new addresses through the beacon.
+- **Phones:** a link for phones opens the browser version from GitHub Pages and joins in one click; the browser version can now join home servers by code too.
+- Devices try every way at once (home network, Tailscale, internet address, beacon) and take the first that answers; direct addresses get a head start.
+- New GitHub Pages workflow for the browser version; tests with a strict local Nostr relay (signatures checked), including an end-to-end test of a desktop app and a browser reaching a host only through the beacon.
+
 ## 1.1.0 — host mode
 
 **Make one of your computers the BeamDesk server**, with no outside service: Settings → Network → *This computer is the server*.

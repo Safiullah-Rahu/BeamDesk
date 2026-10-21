@@ -1,0 +1,30 @@
+# Checks the beacon against the real public Nostr relays (DEFAULT_RELAYS in
+# packages/core/src/beacon.ts): that they pass on its events, and that an encrypted tunnel works
+# through them. Weekly, and when the beacon changes, so a relay that goes away is noticed.
+name: Beacon relays
+
+on:
+  pull_request:
+    paths: ['packages/core/src/beacon.ts', 'packages/core/src/nostr.ts', 'scripts/check-relays.ts', '.github/workflows/relays.yml']
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Public relays carry the beacon
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node scripts/check-relays.ts

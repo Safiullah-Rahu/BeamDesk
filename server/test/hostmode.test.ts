@@ -192,3 +192,53 @@ test('Host headers are only used when they are plain addresses or names', () => 
 test('a port that is taken gives a clear error', async () => {
   await assert.rejects(startHostMode({ port, dataDir, webRoot: null, name: 'Second', secrets, portMapping: false }), /already used by another program/);
 });
+
+test('with the beacon, a device reaches the server through relays only', async (t) => {
+  const { startRelay } = await import('../../packages/core/test/nostr-relay.ts');
+  const { BeaconSocket } = await import('../../packages/core/src/beacon.ts');
+  const relay = await startRelay();
+  t.after(() => relay.close());
+  const bport = await freePort();
+  const bdir = fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-beacon-'));
+  t.after(() => fs.rmSync(bdir, { recursive: true, force: true }));
+  const bsecrets = createHostSecrets();
+  const home = await startHostMode({
+    port: bport,
+    dataDir: bdir,
+    webRoot: null,
+    name: 'Behind CGNAT',
+    secrets: bsecrets,
+    portMapping: false,
+    beacon: { relays: [relay.url] },
+    publicStun: ['stun:stun.example.org:3478'],
+  });
+  t.after(() => home.stop());
+  const code = decodeJoinCode(home.status().code)!;
+  assert.match(home.status().code, /^BD2-/);
+  assert.deepEqual(code.beacon?.relays, [relay.url]);
+  for (let i = 0; i < 40 && home.status().beacon.relays < 1; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(home.status().beacon.relays, 1);
+
+  // Only the beacon: as if every address in the code were unreachable.
+  const c = new SignalingClient({
+    url: 'beacon:',
+    identity: Identity.generate(),
+    name: 'Phone',
+    platform: 'web',
+    accessKey: code.accessKey,
+    createWebSocket: () => new BeaconSocket('beacon:', { key: code.beacon!.key, psk: code.accessKey, relays: code.beacon!.relays }) as unknown as globalThis.WebSocket,
+  });
+  t.after(() => c.stop());
+  c.start();
+  await c.waitOnline(10_000);
+  const urls = c.ice.flatMap((s) => (Array.isArray(s.urls) ? s.urls : [s.urls]));
+  assert.ok(urls.includes('stun:stun.example.org:3478'), 'public STUN for devices behind CGNAT');
+  // The built-in relay only if the internet can reach it, never at a home-network address.
+  assert.ok(!urls.some((u) => /^turn:(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(u)), 'no relay address it cannot reach');
+  assert.equal(home.status().beacon.clients, 1);
+  // Presence and signaling work through the tunnel like over a WebSocket.
+  assert.deepEqual(await c.presence([c.id]), { [c.id]: true });
+  c.stop();
+  for (let i = 0; i < 40 && home.status().beacon.clients > 0; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(home.status().beacon.clients, 0, 'the tunnel is closed when the device leaves');
+});

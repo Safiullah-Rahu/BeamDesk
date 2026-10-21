@@ -10,7 +10,7 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { CheckCircle2, CircleAlert, CircleDashed, ExternalLink, House, Laptop, Server } from 'lucide-preact';
-import { decodeJoinCode, shortFingerprint, type HomeAddressKind, type HostModeInfo } from '@beamdesk/core';
+import { BEACON_URL, decodeJoinCode, shortFingerprint, validRelayUrl, type HomeAddressKind, type HostModeInfo } from '@beamdesk/core';
 import { platform } from '../platform/index.ts';
 import {
   engine,
@@ -27,6 +27,7 @@ import {
   settings,
   toast,
   updateSettings,
+  WEB_APP_URL,
 } from '../state/app.ts';
 import { Button, CopyButton, Segmented, Spinner, Switch } from './kit.tsx';
 
@@ -60,20 +61,18 @@ export function NetworkSection() {
       <p class="hint">
         BeamDesk needs one server that introduces your devices to each other. Your screen and files never pass through it: they go straight between the devices, end-to-end encrypted.
       </p>
-      {desktop && (
-        <Segmented
-          label="Server"
-          value={view}
-          onChange={setView}
-          options={[
-            { value: 'server', label: 'Server address' },
-            { value: 'home', label: 'Connection code' },
-            { value: 'host', label: 'This computer is the server' },
-          ]}
-        />
-      )}
+      <Segmented
+        label="Server"
+        value={view}
+        onChange={setView}
+        options={[
+          { value: 'server', label: 'Server address' },
+          { value: 'home', label: 'Connection code' },
+          ...(desktop ? [{ value: 'host' as const, label: 'This computer is the server' }] : []),
+        ]}
+      />
       {view === 'server' && <ServerPanel />}
-      {view === 'home' && desktop && <HomePanel />}
+      {view === 'home' && <HomePanel />}
       {view === 'host' && desktop && <HostPanel />}
 
       <h3>Privacy</h3>
@@ -165,10 +164,17 @@ function HomePanel() {
   const preview = code.trim() ? decodeJoinCode(code) : null;
   const online = inUse && serverState.value === 'online';
   const via = online ? engine.signaling?.url : '';
-  const viaKind = home?.addresses.find((a) => via?.includes(`//${a.host}:`))?.kind;
+  const viaLabel = via === BEACON_URL ? 'the beacon (public relays)' : KIND_LABEL[home?.addresses.find((a) => via?.includes(`//${a.host}:`))?.kind ?? 'lan'].toLowerCase();
   useEffect(() => () => void (pendingJoin.value = null), []);
   const join = () => {
-    if (!joinHomeServer(code)) return toast('That is not a valid connection code. Copy it again from the computer in host mode.', 'warn');
+    if (!joinHomeServer(code)) {
+      return toast(
+        preview && !preview.beacon
+          ? 'This code is from BeamDesk 1.1: browsers need a code with the beacon. Update BeamDesk on the computer in host mode and copy the code again.'
+          : 'That is not a valid connection code. Copy it again from the computer in host mode.',
+        'warn',
+      );
+    }
     pendingJoin.value = null;
     setCode('');
     toast(`Joined ${decodeJoinCode(code)?.name || 'the home server'}`, 'success');
@@ -182,14 +188,20 @@ function HomePanel() {
         <div class="home-server">
           <div>
             <strong>{home.name || 'Home server'}</strong>{' '}
-            {inUse && (online ? <span class="muted">· connected{viaKind ? ` via ${KIND_LABEL[viaKind].toLowerCase()}` : ''}</span> : <span class="muted">· {serverState.value === 'connecting' ? 'connecting…' : 'not reachable right now'}</span>)}
+            {inUse && (online ? <span class="muted">· connected via {viaLabel}</span> : <span class="muted">· {serverState.value === 'connecting' ? 'connecting…' : 'not reachable right now'}</span>)}
           </div>
           <ul class="addr-list">
-            {home.addresses.map((a) => (
+            {platform.kind === 'desktop' &&
+              home.addresses.map((a) => (
+                <li>
+                  <span class="muted">{KIND_LABEL[a.kind]}</span> <code>{a.host}:{a.port}</code>
+                </li>
+              ))}
+            {home.beacon && (
               <li>
-                <span class="muted">{KIND_LABEL[a.kind]}</span> <code>{a.host}:{a.port}</code>
+                <span class="muted">Anywhere</span> through the beacon ({home.beacon.relays.length || 'default'} public relays, end-to-end encrypted)
               </li>
-            ))}
+            )}
           </ul>
           <p class="hint">
             Certificate <code>{shortFingerprint(home.fingerprint)}</code> — BeamDesk only talks to the server with exactly this certificate.
@@ -237,12 +249,15 @@ function Check({ state, children }: { state: 'ok' | 'bad' | 'wait' | 'off'; chil
 function InternetCheck({ info }: { info: HostModeInfo }) {
   const st = info.status!;
   const net = st.internet;
+  const beacon = st.beacon.enabled;
   const where = net.externalIp ? `${net.externalIp}:${net.externalPort}` : '';
   if (st.publicHost && net.reachable === 'yes') return <Check state="ok">Internet: reachable at <code>{st.publicHost}:{net.externalPort}</code></Check>;
   if (net.behindCgnat) {
-    return (
+    return beacon ? (
+      <Check state="off">Direct from the internet: not possible here — your provider shares one address between several customers (carrier-grade NAT). The beacon below takes over.</Check>
+    ) : (
       <Check state="bad">
-        Internet: not possible on this connection. Your internet provider shares one address between several customers (carrier-grade NAT), so nothing can reach this computer from outside. Use Tailscale instead (see the guide).
+        Internet: not possible on this connection. Your internet provider shares one address between several customers (carrier-grade NAT), so nothing can reach this computer from outside. Turn on the beacon below, or use Tailscale.
       </Check>
     );
   }
@@ -257,14 +272,30 @@ function InternetCheck({ info }: { info: HostModeInfo }) {
     );
   }
   if (net.mapping === 'failed') {
-    return (
+    return beacon ? (
+      <Check state="off">Direct from the internet: your router did not open the port ({net.mappingError}). Not needed: the beacon below takes over.</Check>
+    ) : (
       <Check state="bad">
-        Internet: your router did not open the port ({net.mappingError}). Turn on UPnP in the router settings, forward the port by hand, or use Tailscale — see the guides.
+        Internet: your router did not open the port ({net.mappingError}). Turn on the beacon below, turn on UPnP in the router settings, forward the port by hand, or use Tailscale — see the guides.
       </Check>
     );
   }
-  return <Check state="off">Internet: automatic port opening is off. Forward port {st.port} (TCP and UDP) on your router by hand, or use Tailscale.</Check>;
+  return <Check state="off">Direct from the internet: automatic port opening is off.{beacon ? ' The beacon below takes over.' : ` Forward port ${st.port} (TCP and UDP) on your router by hand, turn on the beacon, or use Tailscale.`}</Check>;
 }
+
+function BeaconCheck({ info }: { info: HostModeInfo }) {
+  const b = info.status!.beacon;
+  if (!b.enabled) return <Check state="off">Anywhere, through the beacon: off.</Check>;
+  if (b.relays === 0) return <Check state="wait">Anywhere, through the beacon: connecting to the public relays…</Check>;
+  return (
+    <Check state="ok">
+      Anywhere, through the beacon: ready ({b.relays} of {b.total} public relays{b.clients ? `, ${b.clients} device${b.clients === 1 ? '' : 's'} connected through it` : ''}). Works behind carrier-grade NAT and without port forwarding.
+    </Check>
+  );
+}
+
+/** For phones: the public copy of the browser version, with the code in the #fragment (it never leaves the browser). */
+const universalLink = (info: HostModeInfo) => `${WEB_APP_URL.replace(/\/?$/, '/')}#join=${info.status?.code ?? ''}`;
 
 /** The address browsers use, with the access key in the #fragment (never sent over the network). */
 const browserLink = (info: HostModeInfo) => `${info.status?.browserUrls.at(-1) ?? ''}/#key=${info.accessKey ?? ''}`;
@@ -293,7 +324,7 @@ function HostPanel() {
       </div>
       <Switch
         label="Host mode"
-        hint="Your other devices connect through this computer, from home or from anywhere. No outside service is involved. Leave this computer switched on."
+        hint="Your other devices connect through this computer, from home or from anywhere. Leave this computer switched on."
         checked={cfg.enabled}
         disabled={busy}
         onChange={(v) => void run({ enabled: v })}
@@ -336,6 +367,7 @@ function HostPanel() {
               Tailscale: {st.tailscale ? <><code>{st.tailscale}:{st.port}</code> — works from anywhere, no router setup</> : 'not installed (optional, see the guide)'}
             </Check>
             <InternetCheck info={info} />
+            <BeaconCheck info={info} />
           </ul>
           <p class="hint">
             {st.devices} device{st.devices === 1 ? '' : 's'} connected to this server (this one included).{' '}
@@ -343,14 +375,24 @@ function HostPanel() {
               Check again
             </button>
           </p>
+          {st.beacon.enabled && WEB_APP_URL && (
+            <div class="field">
+              <span class="field-label">Link for phones and browsers</span>
+              <div class="code-box">
+                <code data-testid="universal-link">{universalLink(info)}</code>
+                <CopyButton text={universalLink(info)} label="Copy link for phones" what="Link copied" />
+              </div>
+              <span class="hint">Works anywhere, in any browser, through the beacon. Private, like the code. The person opening it clicks <strong>Join</strong>.</span>
+            </div>
+          )}
           <div class="field">
-            <span class="field-label">Link for phones and browsers</span>
+            <span class="field-label">{st.beacon.enabled ? 'Browser link without the relays (home network, or an open port)' : 'Link for phones and browsers'}</span>
             <div class="code-box">
               <code data-testid="browser-link">{browserLink(info)}</code>
               <CopyButton text={browserLink(info)} label="Copy browser link" what="Browser link copied" />
             </div>
             <span class="hint">
-              For devices without the app. Also private: it contains the key. The browser warns about the certificate the first time — expected for a home server; continue if the certificate starts with <code>{shortFingerprint(st.fingerprint).slice(0, 9)}</code>.
+              Private too: it contains the key. The browser warns about the certificate the first time — expected for a home server; continue if the certificate starts with <code>{shortFingerprint(st.fingerprint).slice(0, 9)}</code>.
             </span>
           </div>
         </>
@@ -364,6 +406,13 @@ function HostPanel() {
             onChange={(v) => updateSettings({ launchAtLogin: v })}
           />
           <Switch label="Keep this computer awake while hosting" hint="Sleep would disconnect everyone. The screen can still turn off." checked={cfg.keepAwake} onChange={(v) => void run({ keepAwake: v })} />
+          <Switch
+            label="Reach this computer from anywhere through the beacon"
+            hint="Works even when nothing can connect to this computer (carrier-grade NAT, no port forwarding): BeamDesk keeps a connection to a few public Nostr relays, and devices with the code meet it there. Everything is end-to-end encrypted; the relays never see what you send."
+            checked={cfg.beacon}
+            disabled={busy}
+            onChange={(v) => void run({ beacon: v })}
+          />
           <Switch
             label="Open the port on my router automatically"
             hint="Uses UPnP or NAT-PMP, like games and video calls do. The port is closed again when host mode is turned off."
@@ -393,6 +442,7 @@ function HostPanel() {
               </div>
               <span class="hint">Most home internet addresses change now and then, which changes the code. A free dynamic DNS name that follows your address keeps the code the same.</span>
             </label>
+            <RelaysField cfg={cfg} busy={busy} onApply={(relays) => void run({ relays })} />
             <div class="field">
               <span class="field-label">Connection code</span>
               <Button
@@ -415,6 +465,29 @@ function HostPanel() {
   );
 }
 
+function RelaysField({ cfg, busy, onApply }: { cfg: HostModeInfo['config']; busy: boolean; onApply: (relays: string[]) => void }) {
+  const [text, setText] = useState(cfg.relays.join('\n'));
+  const list = text
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const valid = list.length <= 4 && list.every(validRelayUrl);
+  return (
+    <label class="field">
+      <span class="field-label">Beacon relays (optional)</span>
+      <textarea class="input code-input" rows={3} placeholder="Empty: the default public relays" value={text} onInput={(e) => setText(e.currentTarget.value)} spellcheck={false} />
+      <div class="inline-row">
+        <Button size="sm" disabled={busy || !valid || list.join() === cfg.relays.join()} onClick={() => onApply(list)}>
+          Apply
+        </Button>
+      </div>
+      <span class="hint">
+        Up to four Nostr relays (<code>wss://…</code>), for example one you run yourself. They go into the code, so devices that joined before need the new code. {valid ? '' : 'One of the addresses is not a wss:// address.'}
+      </span>
+    </label>
+  );
+}
+
 // ------------------------------------------------------------------ guides
 
 function Guides() {
@@ -423,7 +496,7 @@ function Guides() {
   return (
     <div class="guides">
       <details>
-        <summary>Reach your computer from anywhere with Tailscale (easiest, no router setup)</summary>
+        <summary>Reach your computer from anywhere with Tailscale (an alternative to the beacon)</summary>
         <ol>
           <li>
             Install Tailscale on this computer and on every device you connect from: <Ext href={TAILSCALE_DOWNLOAD}>tailscale.com/download</Ext> (free for personal use).
@@ -474,7 +547,7 @@ function Guides() {
             Back here, click <strong>Check again</strong> in host mode.
           </li>
         </ol>
-        <p class="hint">Not possible if your provider uses carrier-grade NAT (BeamDesk tells you). Then use Tailscale.</p>
+        <p class="hint">Optional with the beacon (direct connections just start a little faster). Not possible if your provider uses carrier-grade NAT — BeamDesk tells you; the beacon works anyway.</p>
       </details>
     </div>
   );

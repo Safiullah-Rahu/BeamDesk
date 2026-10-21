@@ -34,7 +34,7 @@ BEAMDESK_E2E_DESKTOP=1 xvfb-run -a -s "-screen 0 1280x800x24" npx playwright tes
 
 It launches the Electron app as host on a virtual display, connects a browser viewer with the one-time password, moves the remote mouse (and checks the real cursor position), syncs the clipboard, transfers a file and verifies password rotation.
 
-`hostmode.spec.ts` (same command, same variable) covers host mode with two desktop apps and a browser: the code is rejected with a forged certificate fingerprint and accepted with the real one, a session forced through the relay uses the built-in TURN server, the browser link connects, and host mode comes back on by itself after the app restarts.
+`hostmode.spec.ts` (same command, same variable) covers host mode with two desktop apps and a browser, including a host behind carrier-grade NAT reached only through the beacon (via a local Nostr relay, `packages/core/test/nostr-relay.ts`, which checks signatures like public relays do): the code is rejected with a forged certificate fingerprint and accepted with the real one, a session forced through the relay uses the built-in TURN server, the browser link connects, and host mode comes back on by itself after the app restarts.
 
 ## Code map
 
@@ -48,6 +48,10 @@ It launches the Electron app as host on a virtual display, connects a browser vi
 - `apps/desktop/src/main.ts` — Electron main process; `input.ts` input injection; `preload.ts` the bridge.
 
 Core TypeScript is consumed as source (no build step): Vite and esbuild bundle it; Node runs tests with type stripping. Keep to erasable TypeScript syntax (no `enum`, no parameter properties).
+
+## Static browser version (GitHub Pages)
+
+`BEAMDESK_STATIC_SITE=1 npm run build:web` builds the browser version for a website without a BeamDesk server (it then only connects to servers you choose, or home servers through the beacon). `.github/workflows/pages.yml` publishes it to GitHub Pages once Pages is enabled (Settings → Pages → Source: GitHub Actions). The host mode *link for phones* points there; set `BEAMDESK_WEB_APP_URL` when building the apps to use another address.
 
 ## Debugging tips
 

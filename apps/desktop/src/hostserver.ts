@@ -10,15 +10,15 @@
  */
 import { app, powerMonitor, powerSaveBlocker } from 'electron';
 import path from 'node:path';
-import { createHostSecrets, DEFAULT_HOST_PORT, hostSecretsValid, startHostMode, type HostMode, type HostSecrets } from '@beamdesk/server/hostmode';
+import { createHostSecrets, DEFAULT_HOST_PORT, hostSecretsValid, startHostMode, withBeaconKey, type HostMode, type HostSecrets } from '@beamdesk/server/hostmode';
 import { fingerprintOf } from '@beamdesk/server/cert';
-import { decodeJoinCode, homeServerHosts } from '@beamdesk/core/joincode';
+import { decodeJoinCode, homeServerHosts, validRelayUrl } from '@beamdesk/core/joincode';
 import type { HostModeConfig, HostModeInfo } from '@beamdesk/core/bridge';
 import type { SettingsStore } from './store.ts';
 
 const DNS_OR_IP = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
-const DEFAULTS: HostModeConfig = { enabled: false, portMapping: true, keepAwake: true, port: DEFAULT_HOST_PORT, publicHost: '' };
+const DEFAULTS: HostModeConfig = { enabled: false, portMapping: true, keepAwake: true, port: DEFAULT_HOST_PORT, publicHost: '', beacon: true, relays: [] };
 
 /** Accepts only well-formed values; anything else keeps the current one. */
 export function sanitizeHostConfig(current: HostModeConfig, patch: unknown): HostModeConfig {
@@ -29,6 +29,10 @@ export function sanitizeHostConfig(current: HostModeConfig, patch: unknown): Hos
   if (typeof p.keepAwake === 'boolean') next.keepAwake = p.keepAwake;
   if (Number.isInteger(p.port) && (p.port as number) >= 1024 && (p.port as number) <= 65535) next.port = p.port as number;
   if (typeof p.publicHost === 'string' && (p.publicHost === '' || DNS_OR_IP.test(p.publicHost.trim()))) next.publicHost = p.publicHost.trim().toLowerCase();
+  if (typeof p.beacon === 'boolean') next.beacon = p.beacon;
+  if (Array.isArray(p.relays) && p.relays.length <= 4 && p.relays.every((r) => typeof r === 'string' && validRelayUrl(r.trim()))) {
+    next.relays = [...new Set(p.relays.map((r: string) => r.trim()))];
+  }
   return next;
 }
 
@@ -78,7 +82,12 @@ export class HostServer {
       const before = this.config;
       const next = sanitizeHostConfig(before, patch);
       this.store.set('hostMode', next);
-      const restart = before.port !== next.port || before.portMapping !== next.portMapping || before.publicHost !== next.publicHost;
+      const restart =
+        before.port !== next.port ||
+        before.portMapping !== next.portMapping ||
+        before.publicHost !== next.publicHost ||
+        before.beacon !== next.beacon ||
+        before.relays.join() !== next.relays.join();
       if (!next.enabled) await this.stop();
       else if (!this.mode || restart || this.phase === 'error') {
         await this.stop();
@@ -161,6 +170,10 @@ export class HostServer {
     if (!secrets) {
       secrets = createHostSecrets();
       this.store.setSecret('hostSecrets', JSON.stringify(secrets));
+    } else if (!secrets.beaconKey) {
+      // Set up in 1.1: add the beacon key. Codes already shared keep working (without the beacon).
+      secrets = withBeaconKey(secrets);
+      this.store.setSecret('hostSecrets', JSON.stringify(secrets));
     }
     const cfg = this.config;
     this.phase = 'starting';
@@ -176,6 +189,7 @@ export class HostServer {
         secrets,
         portMapping: cfg.portMapping,
         publicHost: cfg.publicHost || undefined,
+        beacon: cfg.beacon ? { relays: cfg.relays } : null,
         log: (m) => console.log(`[host] ${m}`),
       });
       this.phase = 'running';

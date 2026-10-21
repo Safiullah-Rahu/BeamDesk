@@ -87,6 +87,18 @@ When the desktop app runs the server itself (Settings → Network → *This comp
 - **Secrets at rest.** The private key, access key and relay secret are stored with the OS keychain (Electron `safeStorage`) and never handed to the UI process; the UI only receives the access key it needs to connect.
 - **What the host computer can see** is what any BeamDesk server sees (see above); sessions remain end-to-end encrypted and authenticated between the devices.
 
+### The beacon (reaching a host behind carrier-grade NAT)
+
+When nothing can connect to the host computer, devices reach it through public Nostr relays. The relays are untrusted mailboxes; BeamDesk does not rely on any of them being honest or available (it uses several at once, and the user can choose their own).
+
+- **Handshake** (Noise NK with a pre-shared key: X25519, HKDF-SHA256, AES-256-GCM). The code carries the server's static X25519 key *S* and the 128-bit access key *K*. The device sends a fresh key *e*, the time and an AEAD tag under *HKDF(DH(e,S), K)*: only code holders can produce it. The server answers with a fresh key *e′* and its address list under *HKDF(DH(e,S) ‖ DH(e′,e), K)*: only the holder of *S* can produce it. Transport keys come from both DH results (forward secrecy), one per direction.
+- **Transport.** Frames are length-prefixed, cut into ≤16 KB chunks, each AES-GCM-encrypted with its direction and sequence number in the nonce and the header as associated data. Duplicates (every relay delivers a copy) and replays are dropped by sequence number, gaps are waited for and otherwise end the tunnel. Inside the tunnel the normal signaling protocol runs, with all its checks; the session itself is the usual end-to-end encrypted WebRTC connection.
+- **What relays see.** Ephemeral events (kind 25510, not stored) between one-time Nostr keys; the meeting point is an HMAC of the code that changes every day, so relays cannot link days without the code. They see event sizes and timing, and the IP addresses of the host and the devices that connect to them. They cannot read, alter, inject, reorder or replay anything, and cannot pose as the host (that needs *S*'s private key) or as a device (that needs *K*).
+- **Misbehaving relays** cannot suppress the copies from honest relays: an event only counts as "seen" once its id matches its content. Handshake attempts are rate limited and replays (same *e*, or a time more than two minutes off) are refused.
+- **Public STUN.** While the beacon is on, devices also get public STUN servers (Cloudflare, Google), so devices behind carrier-grade NAT learn their public address for the direct connection. These servers see IP addresses only.
+- **Addresses learned through the tunnel** (the host's current direct addresses) are authenticated by the handshake and still used only with the pinned certificate.
+- **Browsers** reach a home server through the beacon from the static copy of the web app on GitHub Pages; the code is in the URL fragment, which browsers never send to any server.
+
 Known limits: anyone with the code can use the server until a new code is made (there is no per-device revocation yet); browsers cannot pin and rely on the user checking the certificate warning once; a dynamic DNS name moves trust for that address to the DNS provider only for *finding* the server — the pinned certificate still decides whether the app talks to it.
 
 ## Hardening in the apps

@@ -13,6 +13,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startRelay } from '../packages/core/test/nostr-relay.ts';
 
 type Theme = 'light' | 'dark';
 
@@ -22,7 +23,8 @@ const DESKTOP_APP = path.resolve(HERE, '../apps/desktop');
 const OUT = path.resolve(HERE, '../docs/images');
 const SIZE = { width: 1280, height: 820 };
 const ROUTER = '192.168.1.1';
-const PUBLIC_IP = '203.0.113.45';
+// The router's own "internet" address is shared carrier-grade NAT space: nothing can come in.
+const PUBLIC_IP = '100.72.14.9';
 
 test.skip(!process.env.BEAMDESK_SHOTS_NETNS, 'run through e2e/netns-screenshots.sh');
 
@@ -97,6 +99,7 @@ test('host mode screenshots', async ({ baseURL }) => {
   test.setTimeout(240_000);
   fs.mkdirSync(OUT, { recursive: true });
   const stopRouter = await fakeRouter();
+  const relay = await startRelay(); // stands in for the public relays
   const homes = [fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-shotA-')), fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-shotB-'))];
   const apps: ElectronApplication[] = [];
   try {
@@ -111,8 +114,17 @@ test('host mode screenshots', async ({ baseURL }) => {
 
       // The computer that stays on: host mode with the router's port opened.
       await openNetwork(a.win, 'This computer is the server');
-      if (!code) await a.win.getByRole('switch', { name: /^Host mode/ }).check();
-      await expect(a.win.getByText('your router opened the port')).toBeVisible({ timeout: 30_000 });
+      if (!code) {
+        await a.win.evaluate((relay) => (window as any).beamdesk.hostMode.set({ relays: [relay] }), relay.url);
+        await a.win.getByRole('switch', { name: /^Host mode/ }).check();
+      }
+      await expect(a.win.getByText(/carrier-grade NAT\). The beacon below takes over/)).toBeVisible({ timeout: 30_000 });
+      await expect(a.win.getByText(/through the beacon: ready/)).toBeVisible({ timeout: 20_000 });
+      // Show the code and the checks.
+      await a.win.locator('.settings-body').evaluate((el) => {
+        const field = el.querySelector('[data-testid=host-code]')!.closest('.field')!;
+        el.scrollTop += field.getBoundingClientRect().top - el.getBoundingClientRect().top - 8;
+      });
       code = (await a.win.getByTestId('host-code').textContent())!;
       await a.win.waitForTimeout(400);
       await a.win.screenshot({ path: path.join(OUT, `settings-hostmode-${theme}.png`), animations: 'disabled' });
@@ -132,6 +144,7 @@ test('host mode screenshots', async ({ baseURL }) => {
   } finally {
     await Promise.allSettled(apps.map((x) => x.close()));
     stopRouter();
+    await relay.close();
     for (const h of homes) fs.rmSync(h, { recursive: true, force: true });
   }
 });

@@ -26,6 +26,7 @@ flowchart TB
 | `server` | `ws`-based signaling server. Bundled with esbuild into one `server.mjs`. Also serves the built web app from memory with precompressed brotli/gzip and strict security headers. |
 | `apps/web` | The user interface (Preact + @preact/signals). A platform layer (`src/platform`) abstracts browser vs desktop. |
 | `apps/desktop` | Electron main process + sandboxed preload. Loads the web UI from a privileged `app://beamdesk` origin. In host mode it runs the server (`server/src/hostmode.ts`) in the main process and opens pinned WebSockets to home servers for the UI (`src/pinnedsocket.ts`). |
+| `packages/core/src/beacon.ts`, `nostr.ts` | The beacon: an encrypted tunnel to a home server through public Nostr relays (NIP-01 client, Noise-NK-with-PSK handshake, ordered encrypted stream). `BeaconServer` runs in the host's main process, `BeaconSocket` (a WebSocket look-alike for the signaling client) in the app or browser that connects. |
 | `server/src/hostmode.ts` | Host mode: the signaling server over TLS 1.3 with a self-signed certificate (`cert.ts`), the built-in STUN/TURN relay (`turn.ts`), router port mapping (`portmap.ts`, UPnP IGD + NAT-PMP), address discovery (`netinfo.ts`) and the connection code (`packages/core/src/joincode.ts`). |
 
 ## Signaling protocol

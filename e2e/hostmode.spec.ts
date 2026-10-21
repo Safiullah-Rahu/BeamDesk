@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeJoinCode, encodeJoinCode } from '../packages/core/src/joincode.ts';
+import { startRelay } from '../packages/core/test/nostr-relay.ts';
 import { dial, expectVideo } from './helpers.ts';
 
 const require = createRequire(import.meta.url);
@@ -79,8 +80,8 @@ test('host mode: join with the code, relay through the built-in TURN, browser li
     apps.push(a.app);
     const b = await launch(homeB, baseURL!);
     apps.push(b.app);
-    // A: turn host mode on (no router in the test network: port mapping off).
-    await a.win.evaluate((port) => (window as any).beamdesk.hostMode.set({ port, portMapping: false }), port);
+    // A: turn host mode on (no router in the test network: port mapping off; no public relays).
+    await a.win.evaluate((port) => (window as any).beamdesk.hostMode.set({ port, portMapping: false, beacon: false }), port);
     await openNetwork(a.win, 'This computer is the server');
     await a.win.getByRole('switch', { name: /^Host mode/ }).check();
     const codeText = (await a.win.getByTestId('host-code').textContent({ timeout: 20_000 }))!;
@@ -149,6 +150,68 @@ test('host mode: join with the code, relay through the built-in TURN, browser li
     await expect(b.win.locator('.pill.ok')).toHaveCount(0, { timeout: 70_000 });
   } finally {
     await Promise.allSettled(apps.map((x) => x.close()));
+    fs.rmSync(homeA, { recursive: true, force: true });
+    fs.rmSync(homeB, { recursive: true, force: true });
+  }
+});
+
+test('behind carrier-grade NAT: desktop and browser reach the host through the beacon only', async ({ baseURL, browser }) => {
+  const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-cgnatA-'));
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'beamdesk-cgnatB-'));
+  const port = await freePort();
+  // A public relay as the outside world would see it (strict: checks every signature).
+  const relay = await startRelay();
+  const apps: ElectronApplication[] = [];
+  try {
+    const a = await launch(homeA, baseURL!);
+    apps.push(a.app);
+    const b = await launch(homeB, baseURL!);
+    apps.push(b.app);
+    await a.win.evaluate(({ port, relay }) => (window as any).beamdesk.hostMode.set({ port, portMapping: false, relays: [relay] }), { port, relay: relay.url });
+    await openNetwork(a.win, 'This computer is the server');
+    await a.win.getByRole('switch', { name: /^Host mode/ }).check();
+    await expect(a.win.getByText(/through the beacon: ready/)).toBeVisible({ timeout: 20_000 });
+    const real = decodeJoinCode((await a.win.getByTestId('host-code').textContent())!)!;
+    expect(real.beacon?.relays).toEqual([relay.url]);
+    expect(await a.win.getByTestId('universal-link').textContent()).toContain('#join=BD2-');
+    await a.win.keyboard.press('Escape');
+    const idA = await idOf(a.win);
+
+    // Behind carrier-grade NAT none of the addresses answers: the code holds only an
+    // unreachable internet address (a documentation range nobody routes).
+    const cgnat = encodeJoinCode({ ...real, addresses: [{ kind: 'internet', host: '203.0.113.77', port }] });
+
+    // A desktop app joins and controls A through the beacon.
+    await join(b.win, cgnat);
+    await expect(b.win.locator('.pill.ok')).toBeVisible({ timeout: 30_000 });
+    await openNetwork(b.win, 'Connection code');
+    await expect(b.win.getByText('connected via the beacon (public relays)')).toBeVisible();
+    await b.win.keyboard.press('Escape');
+    await dial(b.win, idA, await otpOf(a.win));
+    await expectVideo(b.win);
+    await b.win.getByTestId('disconnect').click();
+    await expect(a.win.getByText('Someone is connected to this device')).toHaveCount(0);
+
+    // A browser (a phone) opens the link for phones: the code in the #fragment, Join, connect.
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 820 } });
+    const page = await ctx.newPage();
+    page.on('pageerror', (e) => console.log(`[pageerror] ${e.message}`));
+    await page.goto(`/#join=${cgnat}`);
+    await expect(page.getByTestId('join-code')).toHaveValue(cgnat);
+    await page.getByTestId('join').click();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.pill.ok')).toBeVisible({ timeout: 30_000 });
+    await dial(page, idA, await otpOf(a.win));
+    await expectVideo(page);
+    await page.getByTestId('disconnect').click();
+    await ctx.close();
+
+    // The relays only ever carried ciphertext between one-time keys.
+    expect(relay.accepted.length).toBeGreaterThan(5);
+    expect(relay.accepted.some((e) => e.content.includes('register') || e.content.includes('offer'))).toBe(false);
+  } finally {
+    await Promise.allSettled(apps.map((x) => x.close()));
+    await relay.close();
     fs.rmSync(homeA, { recursive: true, force: true });
     fs.rmSync(homeB, { recursive: true, force: true });
   }

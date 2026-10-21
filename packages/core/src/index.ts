@@ -13,3 +13,5 @@ export * from './viewer.ts';
 export * from './host.ts';
 export * from './bridge.ts';
 export * from './joincode.ts';
+export * from './nostr.ts';
+export * from './beacon.ts';

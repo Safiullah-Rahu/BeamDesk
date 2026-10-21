@@ -67,7 +67,7 @@ The installers are not code-signed yet: Windows shows *"Windows protected your P
 | 🗂️ **Address book** | Recent devices, favorites, nicknames, online status, saved passwords (encrypted with the OS keychain) |
 | 🧭 **Tabs** | Several remote sessions at once; several viewers per host |
 | 🛡️ **Visible sessions** | Always-on-top "someone is connected" bar with one-click disconnect, tray status |
-| 🏠 **Host mode** | One computer is the server: HTTPS/WSS with a pinned self-signed certificate, built-in STUN/TURN relay, router port opening (UPnP / NAT-PMP), Tailscale detection, a connection code for your other devices, back on by itself after a restart |
+| 🏠 **Host mode** | One computer is the server: HTTPS/WSS with a pinned self-signed certificate, built-in STUN/TURN relay, router port opening (UPnP / NAT-PMP), the beacon for carrier-grade NAT, a connection code for your other devices and a one-click link for phones, back on by itself after a restart |
 | 🌙 **Comfortable** | Light & dark themes, start at login, tray, deep links (`beamdesk://connect/123456789`) |
 
 <p align="center">
@@ -119,13 +119,13 @@ On a computer that stays on: **Settings → Network → This computer is the ser
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings-hostmode-dark.png" />
-    <img src="docs/images/settings-hostmode-light.png" width="720" alt="Host mode: the connection code and where this computer can be reached (home network, Tailscale, internet)" />
+    <img src="docs/images/settings-hostmode-light.png" width="720" alt="Host mode behind carrier-grade NAT: the connection code, and 'Anywhere, through the beacon: ready'" />
   </picture>
 </p>
 
-- Works at home right away; from anywhere through your router (opened automatically when it allows it), or through [Tailscale](https://tailscale.com) where port forwarding is impossible.
+- Works at home right away, and **from anywhere — even behind carrier-grade NAT, with no port forwarding**: the built-in *beacon* lets your devices meet your computer through free public [Nostr](https://nostr.com) relays, end-to-end encrypted, and the session then goes directly between the devices. Phones get a link that opens the browser version and joins in one click.
 - Survives restarts: BeamDesk starts at sign-in, keeps the computer awake while hosting and turns host mode back on with the same code. Switch it off in Settings or from the tray icon.
-- Secure by default: TLS 1.3 with a certificate pinned by the code, a 128-bit access key, a relay that only connects your own devices with each other, nothing exposed but one port. Details in the [security model](docs/SECURITY_MODEL.md#host-mode-a-computer-is-the-server).
+- Secure by default: TLS 1.3 with a certificate pinned by the code, a 128-bit access key, a Noise-style handshake for the beacon (the relays see only ciphertext), a TURN relay that only connects your own devices with each other, nothing exposed but one port. Details in the [security model](docs/SECURITY_MODEL.md#host-mode-a-computer-is-the-server).
 
 Step by step: [user guide](docs/USER_GUIDE.md#make-one-of-your-computers-the-server-host-mode).
 
