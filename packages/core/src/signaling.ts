@@ -111,6 +111,11 @@ export class SignalingClient extends Emitter<Events> {
     }
   }
 
+  /** New addresses for the next (re)connect, without dropping the current connection. */
+  setUrls(url: string | string[]): void {
+    this.opts = { ...this.opts, url };
+  }
+
   /** Take over after another window/tab replaced this connection. */
   reclaim(): void {
     this.stop();

@@ -4,7 +4,11 @@
  */
 import { batch, computed, signal } from '@preact/signals';
 import {
+  BEACON_URL,
+  BeaconSocket,
   decodeJoinCode,
+  DEFAULT_RELAYS,
+  encodeJoinCode,
   derivePasswordSecret,
   formatId,
   fromBase64Url,
@@ -22,6 +26,7 @@ import {
   SignalingClient,
   toBase64Url,
   ViewerSession,
+  type BeaconInfo,
   type FileMeta,
   type HomeServer,
   type HostModeConfig,
@@ -127,7 +132,13 @@ export interface ServerTarget {
   accessKey: string;
   /** Certificate fingerprint of a home server (another one means: reconnect). */
   pin?: string;
+  /** The home server's beacon key: reachable through public relays. */
+  beacon?: string;
 }
+
+declare const __WEB_APP_URL__: string;
+/** A copy of the browser version on a public website, for phones reaching a home server by its beacon. */
+export const WEB_APP_URL = __WEB_APP_URL__;
 
 /** Where this device's signaling connects: its own server, a joined home server, or a server address. */
 export const serverTarget = computed<ServerTarget | null>(() => {
@@ -136,9 +147,18 @@ export const serverTarget = computed<ServerTarget | null>(() => {
     return { kind: 'host', ws: hm.localUrl, http: hm.status?.browserUrls.at(-1) ?? '', accessKey: hm.accessKey ?? '', pin: hm.status?.fingerprint };
   }
   const home = homeServer.value;
-  if (platform.kind === 'desktop' && settings.value.connection === 'home' && home) {
+  // Browsers cannot pin a certificate: they reach a home server only through its beacon.
+  if (settings.value.connection === 'home' && home && (platform.kind === 'desktop' || home.beacon)) {
+    const direct = platform.kind === 'desktop' ? homeServerUrls(home) : [];
     const web = home.addresses.find((a) => a.kind === 'name') ?? home.addresses.find((a) => a.kind === 'internet') ?? home.addresses[0];
-    return { kind: 'home', ws: homeServerUrls(home), http: web ? `https://${web.host}:${web.port}` : '', accessKey: home.accessKey, pin: home.fingerprint };
+    return {
+      kind: 'home',
+      ws: home.beacon ? [...direct, BEACON_URL] : direct,
+      http: platform.kind === 'web' ? location.origin + location.pathname.replace(/\/$/, '') : web ? `https://${web.host}:${web.port}` : '',
+      accessKey: home.accessKey,
+      pin: home.fingerprint,
+      beacon: home.beacon?.key,
+    };
   }
   const urls = normalizeServerUrl(settings.value.serverUrl || platform.defaultServer);
   return urls ? { kind: 'server', ws: urls.ws, http: urls.http, accessKey: settings.value.accessKey } : null;
@@ -190,7 +210,8 @@ export function updateSettings(patch: Partial<Settings>): void {
 }
 
 let currentTarget = '';
-const targetKey = (t: ServerTarget | null) => JSON.stringify(t ? [t.ws, t.accessKey, t.pin] : null);
+/** What makes a different server: for a home server not its addresses, which it updates itself. */
+const targetKey = (t: ServerTarget | null) => JSON.stringify(t ? [t.kind, t.kind === 'home' ? '' : t.ws, t.accessKey, t.pin, t.beacon] : null);
 
 /** Reconnects if where this device should connect has changed. */
 function retarget(): void {
@@ -200,7 +221,7 @@ function retarget(): void {
 /** Uses the home server in a connection code. Returns false if the code is not valid. */
 export function joinHomeServer(code: string): boolean {
   const server = decodeJoinCode(code);
-  if (!server) return false;
+  if (!server || (platform.kind === 'web' && !server.beacon)) return false;
   stored.setSecret('homeServer', code.trim());
   // A synchronous call after the write: the app trusts the server's certificate before we connect.
   platform.desktop?.hostMode.get();
@@ -208,6 +229,40 @@ export function joinHomeServer(code: string): boolean {
   updateSettings({ connection: 'home' });
   retarget();
   return true;
+}
+
+/**
+ * The home server told us (through the authenticated tunnel) where it can be reached directly
+ * now: keep that for next time, so a changed internet address needs no new code.
+ */
+function learnAddresses(info: BeaconInfo): void {
+  const home = homeServer.value;
+  if (!home || JSON.stringify(info.addresses) === JSON.stringify(home.addresses)) return;
+  const updated = { ...home, addresses: info.addresses };
+  let code: string;
+  try {
+    code = encodeJoinCode(updated); // also checks every address
+  } catch {
+    return;
+  }
+  stored.setSecret('homeServer', code);
+  homeServer.value = updated;
+  if (serverTarget.value?.kind === 'home') signaling?.setUrls(serverTarget.value.ws);
+}
+
+function createSocketFor(target: ServerTarget): ((url: string) => WebSocket) | undefined {
+  if (target.kind === 'server') return undefined;
+  const home = homeServer.value;
+  return (url) => {
+    if (url === BEACON_URL && home?.beacon) {
+      const relays = home.beacon.relays.length ? home.beacon.relays : DEFAULT_RELAYS;
+      const direct = Array.isArray(target.ws) && target.ws.length > 1;
+      // Direct addresses get a head start: at home they answer first, and the relays stay out of it.
+      return new BeaconSocket(url, { key: home.beacon.key, psk: home.accessKey, relays }, { delayMs: direct ? 1500 : 0, onInfo: learnAddresses }) as unknown as WebSocket;
+    }
+    // Home servers (and our own) have self-signed certificates, pinned by the desktop app.
+    return platform.desktop!.pinnedSocket(url);
+  };
 }
 
 export function leaveHomeServer(): void {
@@ -389,8 +444,7 @@ function startSignaling(): void {
     name: s.deviceName,
     platform: platform.os,
     accessKey: target.accessKey,
-    // Home servers (and our own) have self-signed certificates, pinned by the desktop app.
-    createWebSocket: target.kind === 'server' ? undefined : platform.desktop?.pinnedSocket,
+    createWebSocket: createSocketFor(target),
   });
   signaling.on('error', (e) => {
     if (e.code === 'id-conflict') void regenerateIdentity();
@@ -714,7 +768,8 @@ export function parseLink(raw: string): Link | null {
     return null;
   }
   const seg = path.split('/').filter(Boolean);
-  if (seg[0] === 'join' && seg[1] && decodeJoinCode(seg[1])) return { type: 'join', code: seg[1] };
+  const joinCode = seg[0] === 'join' ? seg[1] : params.get('join');
+  if (joinCode && decodeJoinCode(joinCode)) return { type: 'join', code: joinCode };
   const accessKey = params.get('key');
   if (accessKey && /^[A-Za-z0-9_-]{22}$/.test(accessKey)) return { type: 'key', key: accessKey };
   const k = params.get('k');
@@ -742,10 +797,8 @@ export async function handleLink(raw: string): Promise<void> {
   }
   if (link.type === 'join') {
     // Switching servers is the user's decision: show the code in Settings → Network.
-    if (platform.kind === 'desktop') {
-      pendingJoin.value = link.code;
-      openSettings('network');
-    }
+    pendingJoin.value = link.code;
+    openSettings('network');
   } else if (link.type === 'connect') {
     // Any web page can open a link: always let the user confirm before dialling.
     if (link.id !== myId.value) pendingLink.value = link;

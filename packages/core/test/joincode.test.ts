@@ -58,3 +58,18 @@ test('addresses and pinned hosts', () => {
   assert.deepEqual(homeServerHosts(s), ['192.168.1.20', '100.101.102.103', '81.2.69.160', 'my-home.duckdns.org']);
   assert.match(shortFingerprint(s.fingerprint), /^[0-9A-F]{4}( [0-9A-F]{4}){3}$/);
 });
+
+test('version 2 codes carry the beacon', () => {
+  const s = { ...server(), beacon: { key: toBase64Url(randomBytes(32)), relays: [] as string[] } };
+  const code = encodeJoinCode(s);
+  assert.match(code, /^BD2-/);
+  assert.deepEqual(decodeJoinCode(code), s);
+  const custom = { ...s, beacon: { ...s.beacon, relays: ['wss://relay.example.org', 'wss://nostr.example.com:4443/r', 'ws://127.0.0.1:7777'] } };
+  assert.deepEqual(decodeJoinCode(encodeJoinCode(custom)), custom);
+  assert.throws(() => encodeJoinCode({ ...s, beacon: { ...s.beacon, relays: ['ws://relay.example.org'] } }), /relay/);
+  assert.throws(() => encodeJoinCode({ ...s, beacon: { ...s.beacon, relays: ['https://x.org'] } }), /relay/);
+  // A version 1 prefix on a version 2 body (or the other way round) is not accepted.
+  assert.equal(decodeJoinCode(code.replace(/^BD2-/, 'BD1-')), null);
+  // Without a beacon, still a version 1 code (readable by 1.1).
+  assert.match(encodeJoinCode(server()), /^BD1-/);
+});

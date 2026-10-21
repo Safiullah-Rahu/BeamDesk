@@ -1,6 +1,6 @@
 {
   "name": "@beamdesk/core",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "BeamDesk shared protocol, cryptography and WebRTC session logic.",
   "license": "MIT",
@@ -17,6 +17,8 @@
     "./bridge": "./src/bridge.ts",
     "./host": "./src/host.ts",
     "./joincode": "./src/joincode.ts",
+    "./beacon": "./src/beacon.ts",
+    "./nostr": "./src/nostr.ts",
     "./signaling": "./src/signaling.ts"
   },
   "dependencies": {

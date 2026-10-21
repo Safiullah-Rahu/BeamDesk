@@ -43,6 +43,10 @@ export interface HostModeConfig {
   port: number;
   /** Optional DNS name (dynamic DNS) or fixed address that reaches this computer. */
   publicHost: string;
+  /** Reachable from anywhere through public relays, even behind carrier-grade NAT. */
+  beacon: boolean;
+  /** Relays for the beacon; empty: the default public ones. */
+  relays: string[];
 }
 
 export interface HostModeStatus {
@@ -64,6 +68,14 @@ export interface HostModeStatus {
   code: string;
   browserUrls: string[];
   devices: number;
+  beacon: {
+    enabled: boolean;
+    /** Relays connected / configured. */
+    relays: number;
+    total: number;
+    /** Devices connected through the beacon. */
+    clients: number;
+  };
 }
 
 export interface HostModeInfo {

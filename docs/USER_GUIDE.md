@@ -160,43 +160,47 @@ Recommended extras: **Lock this computer when a session ends** (Settings → Sec
 ## Make one of your computers the server (host mode)
 
 BeamDesk needs a server that introduces your devices to each other. Instead of renting one, a computer
-that stays switched on at home (or in the office) can be that server. Nothing then goes through any
-outside service.
+that stays switched on at home (or in the office) can be that server — on any internet connection,
+including the ones where nothing can connect to your computer from outside (*carrier-grade NAT*, common
+with mobile, fibre and many cable providers).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/settings-hostmode-dark.png" />
-  <img src="images/settings-hostmode-light.png" alt="Settings → Network → This computer is the server: host mode on, the connection code, and where the server can be reached" width="760" />
+  <img src="images/settings-hostmode-light.png" alt="Host mode behind carrier-grade NAT: the connection code, the home network, and 'Anywhere, through the beacon: ready'" width="760" />
 </picture>
 
 **On the computer that stays on**
 
 1. Open **Settings → Network** and choose **This computer is the server**.
-2. Turn on **Host mode**. After a few seconds BeamDesk shows a **connection code** (it starts with `BD1-`).
+2. Turn on **Host mode**. After a few seconds BeamDesk shows a **connection code** (it starts with `BD2-`).
 3. Click the copy button next to the code and send it to yourself (e-mail, chat, a USB stick…).
    **Keep it private:** the code is the key to your server.
 
 BeamDesk also shows where the server can be reached:
 
 - **Home network** — devices on the same Wi‑Fi can always connect.
-- **Tailscale** — appears when Tailscale is installed (see below): reachable from anywhere.
-- **Internet** — BeamDesk asks your router to open the port, the way games and video calls do (UPnP / NAT-PMP).
-  If your router refuses, turn on *UPnP* in the router's settings, forward the port by hand (guide in the app), or use Tailscale.
-  Some internet providers share one address between many homes (*carrier-grade NAT*); BeamDesk tells you when that is the case, and then only Tailscale works.
+- **Tailscale** — appears when Tailscale is installed (optional, see below).
+- **Direct from the internet** — BeamDesk asks your router to open the port, the way games and video calls do (UPnP / NAT-PMP).
+  This is a bonus, not a requirement: it often does not work (a router without UPnP, or *carrier-grade NAT*, where your provider shares one address between many homes). BeamDesk tells you when that is the case.
+- **Anywhere, through the beacon** — always on, works everywhere. Your computer keeps a connection to a few free public [Nostr](https://nostr.com) relays (open message servers that anyone can use, no account), and your devices meet it there. Everything is end-to-end encrypted: the relays carry scrambled data between random one-time keys and cannot read, change or fake anything. Once two devices have found each other, the screen goes **directly** between them, as always.
 
 **On your other computers**
 
 1. Install BeamDesk, open **Settings → Network** and choose **Connection code**.
 2. Paste the code and click **Join**. The pill turns to **Ready**.
-3. Connect with the usual ID and password. Each device connects through the fastest way available: home network, Tailscale or internet.
+3. Connect with the usual ID and password. Each device takes the fastest way available: home network, Tailscale, the internet address, or the beacon.
+
+If your internet address changes, nothing needs to be shared again: devices that joined learn the new addresses through the beacon.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/settings-joincode-dark.png" />
   <img src="images/settings-joincode-light.png" alt="Settings → Network → Connection code: joined a home server, connected via the home network" width="760" />
 </picture>
 
-**Phones and computers without the app:** copy the **Link for phones and browsers** shown under the code and open it in the browser.
-The browser warns that the connection is not private the first time: that is expected for a home server (it has its own certificate instead of one from a company).
-Choose *Advanced → Continue*, and check that the certificate's fingerprint starts with the characters BeamDesk shows.
+**Phones and computers without the app:** copy the **Link for phones and browsers** shown under the code (`https://safiullah-rahu.github.io/BeamDesk/#join=…`) and open it on the phone. Click **Join** — done.
+The link opens the browser version of BeamDesk from a public website; the code stays in the part of the link after `#`, which browsers never send anywhere. It works on any network.
+
+The second link, *without the relays*, opens the browser version straight from your computer — handy on the home network. The browser warns that the connection is not private the first time: that is expected for a home server (it has its own certificate instead of one from a company). Choose *Advanced → Continue*, and check that the certificate's fingerprint starts with the characters BeamDesk shows.
 
 **Switching it off and on**
 
@@ -209,13 +213,13 @@ Choose *Advanced → Continue*, and check that the certificate's fingerprint sta
 **If something goes wrong**
 
 - *Port … is already used by another program* — choose another port in **Advanced**. The connection code changes; share it again.
-- Your internet address changes from time to time with most providers, and with it the code. A free *dynamic DNS* name (for example from DuckDNS) entered under **Advanced → Internet name** keeps the code the same.
+- *Through the beacon: connecting to the public relays…* for a long time — your network blocks them (some offices and schools do). Enter other relays under **Advanced → Beacon relays** (any Nostr relay works, also one you run yourself), or use Tailscale.
+- A device cannot connect even though both show **Ready**: very strict networks on *both* sides can block the direct screen connection. Tailscale, or a server with a relay (Docker Compose setup), helps there.
 - Someone got your code who should not have it? **Advanced → Make a new code.** Every device has to join again with the new code; the old one stops working at once.
 
-### Reach your server from anywhere with Tailscale
+### Alternative: Tailscale
 
-[Tailscale](https://tailscale.com/download) connects your own devices with each other over the internet, without router settings.
-It works even where port forwarding is impossible.
+The beacon already works without router settings. [Tailscale](https://tailscale.com/download) is an alternative that connects your own devices with each other over the internet, and also relays the screen when both networks are very strict.
 
 1. Install Tailscale on the computer in host mode and on every device you connect from (free for personal use).
 2. Sign in to Tailscale with the same account on all of them.
@@ -238,7 +242,7 @@ The free plan sleeps after 15 minutes without use (the first connection then tak
 
 ## Using BeamDesk on a phone or tablet
 
-Open your BeamDesk server's address in the phone's browser and connect as usual.
+Open your BeamDesk server's address in the phone's browser and connect as usual. For a computer in host mode, open its **link for phones** (see above).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/mobile-dark.png" />
@@ -274,7 +278,7 @@ Open your BeamDesk server's address in the phone's browser and connect as usual.
 |---|---|
 | "That device is offline or the ID is wrong" | Check the 9 digits. BeamDesk must be open (or in the tray) on the other computer and show **Ready**. |
 | The pill says *Offline* or *Server error* | Check your internet. On private servers, check the address and access key in **Settings → Network**. |
-| Joined a home server, but the pill stays on *Connecting…* | The computer in host mode must be on and show *Ready · hosting*. Away from home, it needs the *Internet* or *Tailscale* line to be green. If its code was renewed, join again with the new code. |
+| Joined a home server, but the pill stays on *Connecting…* | The computer in host mode must be on and show *Ready · hosting*, with *Anywhere, through the beacon: ready*. Through the beacon connecting takes a few seconds. If its code was renewed, join again with the new code. Check that the clock of both devices is right (it is part of the encryption). |
 | "Your server is off" | Host mode could not start on this computer — **Details** shows why (usually the port is taken: choose another one in **Advanced**). |
 | "Open in another window" | BeamDesk is open in another browser tab. Click **Use here**, or close the other tab. |
 | I see the screen but cannot click | The other side shares from a **browser** (view-only), or they switched off *Control*. Also check the **View only** button isn't on. |

@@ -5,20 +5,32 @@
  *  - the signaling server over HTTPS/WSS (TLS 1.3, self-signed certificate pinned by the code),
  *  - a STUN/TURN relay for networks where devices cannot reach each other directly,
  *  - optionally the router's port forwarding (UPnP / NAT-PMP), renewed while it runs,
- *  - a connection code with the addresses, the certificate fingerprint and the access key.
+ *  - optionally the beacon: reachable through public Nostr relays when nothing else works
+ *    (carrier-grade NAT, no port forwarding), end-to-end encrypted (packages/core/src/beacon.ts),
+ *  - a connection code with the addresses, the certificate fingerprint, the access key and the
+ *    beacon key.
  */
 import crypto from 'node:crypto';
 import tls from 'node:tls';
 import { encodeJoinCode, type HomeAddress } from '@beamdesk/core/joincode';
+import { BeaconServer, beaconKeypair, beaconPublicKey, DEFAULT_RELAYS } from '@beamdesk/core/beacon';
+import { fromBase64Url, toBase64Url } from '@beamdesk/core/util';
 import type { HostModeStatus } from '@beamdesk/core/bridge';
 import { certificateValid, createHostCertificate, fingerprintOf } from './cert.ts';
 import { loadConfig } from './config.ts';
 import { classifyIPv4, defaultGateway, localAddresses, primaryAddress, type LocalAddresses } from './netinfo.ts';
 import { PortMapper, type PortMapperOptions, type PortMapResult } from './portmap.ts';
 import { createBeamServer, type BeamServer } from './server.ts';
+import type { SelfIce } from './ice.ts';
 import { createTurnServer, type TurnServer } from './turn.ts';
 
 export const DEFAULT_HOST_PORT = 41443;
+
+/**
+ * Public STUN servers, used only with the beacon: devices behind carrier-grade NAT learn their
+ * public address from them so they can connect directly (these servers only see IP addresses).
+ */
+export const DEFAULT_PUBLIC_STUN = ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'];
 
 export interface HostSecrets {
   /** PEM private key and certificate of the server. */
@@ -28,11 +40,24 @@ export interface HostSecrets {
   accessKey: string;
   /** Secret of the relay's short-lived credentials. */
   turnSecret: string;
+  /** X25519 secret key of the beacon (base64url); its public key is in the connection code. */
+  beaconKey?: string;
 }
 
 export function createHostSecrets(): HostSecrets {
   const { key, cert } = createHostCertificate();
-  return { key, cert, accessKey: crypto.randomBytes(16).toString('base64url'), turnSecret: crypto.randomBytes(32).toString('base64url') };
+  return {
+    key,
+    cert,
+    accessKey: crypto.randomBytes(16).toString('base64url'),
+    turnSecret: crypto.randomBytes(32).toString('base64url'),
+    beaconKey: toBase64Url(beaconKeypair().secret),
+  };
+}
+
+/** Secrets from 1.1 have no beacon key yet: adds one (the caller stores the result). */
+export function withBeaconKey(s: HostSecrets): HostSecrets {
+  return s.beaconKey ? s : { ...s, beaconKey: toBase64Url(beaconKeypair().secret) };
 }
 
 /** True if stored secrets are complete and belong together. */
@@ -45,6 +70,7 @@ export function hostSecretsValid(s: Partial<HostSecrets> | null | undefined): s 
     /^[A-Za-z0-9_-]{22}$/.test(s.accessKey) &&
     typeof s.turnSecret === 'string' &&
     s.turnSecret.length >= 32 &&
+    (s.beaconKey === undefined || (typeof s.beaconKey === 'string' && /^[A-Za-z0-9_-]{43}$/.test(s.beaconKey))) &&
     certificateValid({ key: s.key, cert: s.cert })
   );
 }
@@ -60,6 +86,10 @@ export interface HostModeOptions {
   portMapping: boolean;
   /** A DNS name (or fixed address) that reaches this computer, e.g. from a dynamic DNS service. */
   publicHost?: string;
+  /** Reachable through public relays ([] = the default relays); null or absent: off. */
+  beacon?: { relays: string[] } | null;
+  /** STUN servers handed to devices while the beacon is on (default DEFAULT_PUBLIC_STUN). */
+  publicStun?: string[];
   log?: (msg: string) => void;
   /** Tests. */
   portMapper?: Partial<PortMapperOptions>;
@@ -99,6 +129,8 @@ export async function startHostMode(opts: HostModeOptions): Promise<HostMode> {
   const log = opts.log ?? (() => undefined);
   if (!hostSecretsValid(opts.secrets)) throw new Error('Host mode secrets are missing or damaged.');
   const { secrets, port } = opts;
+  const beaconOn = !!opts.beacon && !!secrets.beaconKey;
+  const customRelays = opts.beacon?.relays.slice(0, 4) ?? [];
   const fingerprint = fingerprintOf(secrets.cert);
   const publicHost = opts.publicHost?.trim().toLowerCase() || null;
 
@@ -127,7 +159,8 @@ export async function startHostMode(opts: HostModeOptions): Promise<HostMode> {
     DATA_DIR: opts.dataDir,
     WEB_ROOT: opts.webRoot ?? '',
     ACCESS_KEY: secrets.accessKey,
-    STUN_URLS: '', // no outside STUN server: the built-in one answers
+    // Without the beacon no outside STUN server is needed: the built-in one answers.
+    STUN_URLS: beaconOn ? (opts.publicStun ?? DEFAULT_PUBLIC_STUN).join(',') : '',
     TURN_TTL: '3600',
     // A home server serves one household: small limits make abuse pointless.
     MAX_CLIENTS: '256',
@@ -169,14 +202,41 @@ export async function startHostMode(opts: HostModeOptions): Promise<HostMode> {
 
   let mapper: PortMapper | null = null;
 
-  const status = (): HostModeStatus => {
+  /** Where this server can be reached directly right now. */
+  const currentAddresses = (): HomeAddress[] => {
     const addresses: HomeAddress[] = [];
     for (const ip of addrs.lan.slice(0, 2)) addresses.push({ kind: 'lan', host: ip, port });
     for (const ip of addrs.tailscale.slice(0, 1)) addresses.push({ kind: 'tailscale', host: ip, port });
     if (internet.externalIp && classifyIPv4(internet.externalIp) === 'public') addresses.push({ kind: 'internet', host: internet.externalIp, port: internet.externalPort });
     if (publicHost) addresses.push({ kind: 'name', host: publicHost, port: internet.externalPort });
     if (!addresses.length) addresses.push({ kind: 'lan', host: relayAddress, port });
-    const code = encodeJoinCode({ name: opts.name, fingerprint, accessKey: secrets.accessKey, addresses });
+    return addresses;
+  };
+
+  /** The built-in relay for devices coming through the beacon: only if the internet can reach it. */
+  const remoteIce = (): SelfIce | null =>
+    internet.externalIp && !internet.behindCgnat && (internet.reachable === 'yes' || internet.mapping === 'upnp' || internet.mapping === 'nat-pmp')
+      ? { host: internet.externalIp, port: externalUdpPort, secret: secrets.turnSecret }
+      : null;
+
+  const beaconPub = beaconOn ? toBase64Url(beaconPublicKey(fromBase64Url(secrets.beaconKey!))) : null;
+  let beacon: BeaconServer | null = null;
+  if (beaconOn) {
+    beacon = new BeaconServer({
+      secret: fromBase64Url(secrets.beaconKey!),
+      psk: fromBase64Url(secrets.accessKey),
+      relays: customRelays.length ? customRelays : DEFAULT_RELAYS,
+      info: () => ({ name: opts.name, addresses: currentAddresses() }),
+      onConnection: (c) => beam.attach(c, { key: `beacon:${c.id}`, selfIce: remoteIce() }),
+      onStatus: () => emit(),
+    });
+    beacon.start();
+  }
+
+  const status = (): HostModeStatus => {
+    const addresses = currentAddresses();
+    const code = encodeJoinCode({ name: opts.name, fingerprint, accessKey: secrets.accessKey, addresses, beacon: beaconPub ? { key: beaconPub, relays: customRelays } : undefined });
+    const b = beacon?.status();
     return {
       state: stopped ? 'stopped' : 'running',
       port,
@@ -188,6 +248,7 @@ export async function startHostMode(opts: HostModeOptions): Promise<HostMode> {
       code,
       browserUrls: addresses.map((a) => `https://${a.host}:${a.port}`),
       devices: beam.stats().registered,
+      beacon: { enabled: beaconOn, relays: b?.relays ?? 0, total: b?.total ?? 0, clients: b?.clients ?? 0 },
     };
   };
 
@@ -314,6 +375,7 @@ export async function startHostMode(opts: HostModeOptions): Promise<HostMode> {
       stopped = true;
       clearInterval(watcher);
       clearInterval(counter);
+      beacon?.stop();
       await Promise.allSettled([mapper?.stop(), beam.close(), turn.close()]);
       log('host mode: stopped');
     },

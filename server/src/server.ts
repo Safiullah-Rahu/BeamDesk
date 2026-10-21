@@ -8,6 +8,7 @@
  *  - hand out STUN/TURN configuration (with short-lived TURN credentials),
  *  - serve the web app.
  */
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import https from 'node:https';
 import crypto from 'node:crypto';
@@ -118,11 +119,68 @@ export interface ServerOptions {
   perIpConnections?: { concurrent: number; perSecond: number; burst: number };
 }
 
+/** A client connection that does not arrive over TCP (host mode's beacon tunnel). */
+export interface VirtualConnection {
+  send(frame: string): void;
+  close(): void;
+  onframe: ((frame: string) => void) | null;
+  onclose: (() => void) | null;
+}
+
 export interface BeamServer {
   http: http.Server;
   listen(): Promise<number>;
   close(): Promise<void>;
   stats(): { clients: number; registered: number; devices: number };
+  /**
+   * Serves a tunneled client like a WebSocket one. `key` takes the place of its IP address for
+   * rate limits; `selfIce` is the built-in relay as that client can reach it (null: none).
+   */
+  attach(conn: VirtualConnection, opts: { key: string; selfIce: SelfIce | null }): void;
+}
+
+/** Just enough of a `ws` WebSocket for onConnection(), backed by a VirtualConnection. */
+class VirtualSocket extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+  readonly bufferedAmount = 0;
+  private readonly conn: VirtualConnection;
+
+  constructor(conn: VirtualConnection) {
+    super();
+    this.conn = conn;
+    conn.onframe = (f) => {
+      if (this.readyState !== WebSocket.OPEN) return;
+      // Same limit as for WebSocket messages.
+      if (f.length > LIMITS.wsMessageBytes) return this.terminate();
+      this.emit('message', Buffer.from(f), false);
+    };
+    conn.onclose = () => this.ended();
+  }
+
+  send(data: string): void {
+    if (this.readyState === WebSocket.OPEN) this.conn.send(data);
+  }
+
+  /** The tunnel has its own keepalive; answer pings at once. */
+  ping(): void {
+    queueMicrotask(() => this.emit('pong'));
+  }
+
+  close(): void {
+    this.terminate();
+  }
+
+  terminate(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.conn.close();
+    this.ended();
+  }
+
+  private ended(): void {
+    if (this.readyState === WebSocket.CLOSED) return;
+    this.readyState = WebSocket.CLOSED;
+    queueMicrotask(() => this.emit('close'));
+  }
 }
 
 /** The host part of a Host header if it is a plain IP address or DNS name, else null. */
@@ -224,6 +282,8 @@ export function createBeamServer(config: Config, options: ServerOptions = {}): B
   }
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIMITS.wsMessageBytes, perMessageDeflate: false });
+  const virtual = new Set<VirtualSocket>();
+  let closed = false;
 
   server.on('upgrade', (req, socket, head) => {
     const pathname = (req.url ?? '').split('?')[0];
@@ -234,7 +294,7 @@ export function createBeamServer(config: Config, options: ServerOptions = {}): B
     const ip = rateLimitKey(clientIp(req, config.trustProxy));
     if (
       (perIp.get(ip) ?? 0) >= config.maxConnectionsPerIp ||
-      wss.clients.size >= config.maxClients ||
+      wss.clients.size + virtual.size >= config.maxClients ||
       !bucketFor(connectionsPerIp, ip, 0.5, 60).take()
     ) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\n\r\n');
@@ -445,14 +505,27 @@ export function createBeamServer(config: Config, options: ServerOptions = {}): B
       }),
     close: () =>
       new Promise((resolve) => {
+        closed = true;
         clearInterval(heartbeat);
         for (const ws of wss.clients) ws.terminate();
+        for (const ws of virtual) ws.terminate();
         wss.close();
         registry.close();
         server.close(() => resolve());
         server.closeAllConnections?.();
       }),
-    stats: () => ({ clients: wss.clients.size, registered: online.size, devices: registry.size }),
+    stats: () => ({ clients: wss.clients.size + virtual.size, registered: online.size, devices: registry.size }),
+    attach(conn, opts) {
+      const ip = `virtual:${opts.key}`.slice(0, 80);
+      if (closed || wss.clients.size + virtual.size >= config.maxClients || (perIp.get(ip) ?? 0) >= config.maxConnectionsPerIp) {
+        conn.close();
+        return;
+      }
+      const ws = new VirtualSocket(conn);
+      virtual.add(ws);
+      ws.once('close', () => virtual.delete(ws));
+      onConnection(ws as unknown as WebSocket, ip, opts.selfIce);
+    },
   };
 }
 
