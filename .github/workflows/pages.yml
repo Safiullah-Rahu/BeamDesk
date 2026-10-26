@@ -42,7 +42,7 @@ jobs:
         run: npm run build:web
         env:
           BEAMDESK_STATIC_SITE: '1'
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: apps/web/dist
       - name: Check that GitHub Pages is set up
