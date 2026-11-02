@@ -12,11 +12,11 @@
   },
   "dependencies": {
     "@beamdesk/core": "*",
-    "@preact/signals": "^2.3.1",
-    "lucide-preact": "^1.59.0",
-    "preact": "^11.0.1"
+    "@preact/signals": "^2.11.4",
+    "lucide-preact": "^1.64.0",
+    "preact": "^11.1.0"
   },
   "devDependencies": {
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   }
 }
